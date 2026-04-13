@@ -12,7 +12,7 @@ foreach ($file in $changedFiles) {
     $lines = Get-Content $file
     $lineFound = $false
     $newLines = $lines | ForEach-Object {
-        if (-not $lineFound -and $_ -match '^#git-hash\s*=\s*.*$') {
+        if (-not $lineFound -and $_ -match '^git-hash\s*=\s*.*$') {
             $lineFound = $true
             'git-hash = "' + $commitHash + '"'
         } else {
