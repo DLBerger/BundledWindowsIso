@@ -115,6 +115,12 @@ Explicit path to dism.exe.
 .PARAMETER oscdimg
 Explicit path to oscdimg.exe.
 
+.PARAMETER ISO
+Explicit path to source ISO
+
+.PARAMETER DestISO
+Explicit path to destination ISO
+
 .EXAMPLE
 PS> .\BundledWindowsIso.ps1 D:\temp -Pro -CleanWork
 Builds a bundled ISO using the Pro edition only, deleting any prior work folder first.
@@ -221,7 +227,7 @@ echo.
 endlocal
 '@
 
-  CatalogBroadQueryTemplate = '{0}, version {1} for {2}-based Systems'
+  CatalogBroadQueryTemplate = '{0} {1}'
   CatalogCategoryMatchers = [ordered]@{
     LCU     = '(?i)\bCumulative Update\b'
     SetupDU = '(?i)\bSetup Dynamic Update\b'
@@ -295,8 +301,13 @@ function Show-Usage {
   $name = if ($script:ScriptPath) { Split-Path -Leaf $script:ScriptPath } else { 'BundledWindowsIso.ps1' }
   Write-Host ""
   Write-Host "$name usage:" -ForegroundColor Cyan
-  Write-Host "  & '$name' <Folder> [-Home|-Pro|-Indices <spec>] [-CleanWork] [-UpdateISO] [-UpdateMSUs] [-CleanMSUs] [-DryRun] [-Verbose]" -ForegroundColor Cyan
-  Write-Host "  & '$name' -ShowIndices" -ForegroundColor Cyan
+  Write-Host "  & '$name' [<Folder>] [-ISO <path>] [-DestISO <path>] [-Home|-Pro|-Indices <spec>] [-CleanWork] [-UpdateISO] [-UpdateMSUs] [-CleanMSUs] [-DryRun] [-Verbose]" -ForegroundColor Cyan
+  Write-Host "  & '$name' -ShowIndices [-ISO <path>]" -ForegroundColor Cyan
+  Write-Host ""
+  Write-Host "Key Options:" -ForegroundColor Cyan
+  Write-Host "  <Folder>          Work directory (default: current directory)" -ForegroundColor Gray
+  Write-Host "  -ISO, -SrcISO     Explicit path to input ISO (overrides auto-detect)" -ForegroundColor Gray
+  Write-Host "  -DestISO          Explicit path for output bundled ISO" -ForegroundColor Gray
   Write-Host ""
 }
 
@@ -427,9 +438,9 @@ function Stop-TrackedChildren {
 }
 
 function Invoke-DismRead {
-  param([Parameter(Mandatory=$true)][string[]]$DismArgs)
+  param([Parameter(Mandatory=$true)][string[]]$Args)
   Assert-NotCancelled
-  $out = & $script:State.DismPath @DismArgs
+  $out = & $script:State.DismPath @Args
   return ,$out
 }
 
@@ -679,15 +690,25 @@ function Get-InputIso([string]$FolderPath) {
 
 function Mount-Iso([string]$IsoPath) {
   if (In-AfterPrepDryRun) { return @{ Drive=$null } }
+  
+  V "Mounting ISO: $IsoPath"
   $img = Mount-DiskImage -ImagePath $IsoPath -PassThru
   $vol = $img | Get-Volume -ErrorAction SilentlyContinue
+  
   if (-not $vol -or -not $vol.DriveLetter) {
+    V "First mount attempt did not resolve drive letter; retrying..."
     Dismount-DiskImage -ImagePath $IsoPath -ErrorAction SilentlyContinue | Out-Null
+    Start-Sleep -Milliseconds 500
     $img = Mount-DiskImage -ImagePath $IsoPath -PassThru
-    $vol = $img | Get-Volume
+    $vol = $img | Get-Volume -ErrorAction SilentlyContinue
   }
-  if (-not $vol -or -not $vol.DriveLetter) { Fail "Failed to mount ISO or resolve a drive letter." }
+  
+  if (-not $vol -or -not $vol.DriveLetter) { 
+    Fail "Failed to mount ISO or resolve a drive letter. Check that the ISO is valid and accessible. You may need to manually eject any mounted images in Disk Management." 
+  }
+  
   $script:State.IsoWasMounted = $true
+  V "ISO mounted at drive: $($vol.DriveLetter):"
   return @{ Drive="$($vol.DriveLetter):" }
 }
 
@@ -708,10 +729,10 @@ function Copy-IsoContents([string]$SrcDrive, [string]$DstFolder, [string]$IsoPat
   Write-Host ("  Destination: {0}" -f $dstDisplay) -ForegroundColor Cyan
   Write-Host ("  Log:         {0}" -f $logPath) -ForegroundColor Cyan
 
-  $RobocopyArgs = @($srcDisplay, $dstDisplay, "*.*") + $Config.RobocopyArgsBase
-  if ($VerbosePreference -ne 'Continue') { $RobocopyArgs += $Config.RobocopyArgsQuiet }
+  $args = @($srcDisplay, $dstDisplay, "*.*") + $Config.RobocopyArgsBase
+  if ($VerbosePreference -ne 'Continue') { $args += $Config.RobocopyArgsQuiet }
 
-  if ($VerbosePreference -ne 'Continue') { robocopy @RobocopyArgs *> $logPath } else { robocopy @RobocopyArgs }
+  if ($VerbosePreference -ne 'Continue') { robocopy @args *> $logPath } else { robocopy @args }
   $rc = [int]$LASTEXITCODE
   if ($rc -ge 8) { Fail "Robocopy failed with exit code $rc. See log: $logPath" }
 }
@@ -1018,18 +1039,19 @@ function Detect-MediaInfoFromInstallWim {
   $pairs = Get-WimPairs -InstallPath $InstallWim
   $sampleName = ($pairs | Select-Object -First 1).Name
 
-  $os = if ($sampleName -match '(?i)Windows\s+11') { "Windows 11" } elseif ($sampleName -match '(?i)Windows\s+10') { "Windows 10" } else { "Windows" }
-
   $arch = $null
   $build = $null
 
   $out = Invoke-DismRead -Args @("/Get-WimInfo", "/WimFile:$InstallWim", "/Index:1")
+  $count = 0
   foreach ($line in $out) {
+    $count++
+    if ($count -lt 7) { continue } # First 7 lines are header
     if (-not $arch -and $line -match '^\s*Architecture\s*:\s*(.+)\s*$') {
       $arch = $Matches[1].Trim().ToLowerInvariant()
       if ($arch -eq 'amd64') { $arch = 'x64' }
     }
-    if (-not $build -and $line -match '^\s*Version\s*:\s*10\.0\.(\d+)\.\d+\s*$') {
+    if (-not $build -and $line -match '^\s*Version\s*:\s*\d+\.\d+\.(\d+)\s*$') {
       $build = [int]$Matches[1]
     }
   }
@@ -1047,14 +1069,40 @@ function Detect-MediaInfoFromInstallWim {
   $m = [regex]::Match($base, '(?i)(?:^|[^0-9A-Za-z])(2[0-9]H[1-2])(?:[^0-9A-Za-z]|$)')
   if ($m.Success) { $release = $m.Groups[1].Value.ToUpperInvariant() }
 
-  if (-not $release -and $build) {
-    if ($build -ge 26200) { $release = "25H2" }
-    elseif ($build -ge 26100) { $release = "24H2" }
-    elseif ($build -ge 22631) { $release = "23H2" }
-    elseif ($build -ge 22621) { $release = "22H2" }
+  if ($sampleName -match '(?i)Windows\s+11') {
+    $os = "Windows 11"
+    if (-not $release -and $build) {
+      if ($build -ge 28000) { $release = "26H1" }
+      elseif ($build -ge 26200) { $release = "25H2" }
+      elseif ($build -ge 26100) { $release = "24H2" }
+      elseif ($build -ge 22631) { $release = "23H2" }
+      elseif ($build -ge 22621) { $release = "22H2" }
+      else { $release = "21H1" }
+    }
+  } elseif ($sampleName -match '(?i)Windows\s+10') {
+    $os = "Windows 10"
+    if (-not $release -and $build) {
+      if ($build -ge 19045) { $release = "22H2" }
+      elseif ($build -eq 19044) { $release = "21H2" }
+      elseif ($build -eq 19043) { $release = "21H1" }
+      elseif ($build -eq 19042) { $release = "20H2" }
+      elseif ($build -eq 19041) { $release = "2004" }
+      elseif ($build -ge 18363) { $release = "1909" }
+      elseif ($build -eq 18362) { $release = "1903" }
+      elseif ($build -ge 17763) { $release = "1809" }
+      elseif ($build -ge 17134) { $release = "1803" }
+      elseif ($build -ge 16299) { $release = "1709" }
+      elseif ($build -ge 15063) { $release = "1703" }
+      elseif ($build -ge 14393) { $release = "1607" }
+      elseif ($build -ge 10586) { $release = "1511" }
+      else { $release = "1507" }
+    }
+  } elseif ($sampleName -match '(?i)Windows\s+8.1') {
+    $os = "Windows 8.1"
+  } else {
+    $os = "Windows"
   }
-
-  if (-not $release) { $release = "24H2" }
+  if (-not $release -and $build) { $release = $build }
 
   $script:State.DetectedOS = $os
   $script:State.DetectedArch = $arch
@@ -1208,7 +1256,8 @@ function Ensure-AllMSUsPresent {
 
   $results = Get-CatalogCandidatesBroad -OsName $OsName -ReleaseToken $ReleaseToken -Arch $Arch
   if ($results.Count -lt 1) {
-    Fail "Catalog broad search returned no results for $OsName, version $ReleaseToken, $Arch."
+    Write-Host "Catalog broad search returned no results for $OsName, version $ReleaseToken, $Arch."
+     return [pscustomobject]@{}
   }
 
   Write-Host ("Search completed for broad query; found {0} updates" -f $results.Count) -ForegroundColor Cyan
@@ -1217,21 +1266,22 @@ function Ensure-AllMSUsPresent {
   $selected = [ordered]@{}
 
   $lcuPick = Pick-LatestByCategoryPreferMonth -Results $results -Category 'LCU' -PreferYYYYMM $null
-  if (-not $lcuPick) { Fail "Could not find a catalog entry for LCU ($OsName $ReleaseToken $Arch) using broad search." }
-  $lcuYM = (Parse-YYYYMMFromTitle $lcuPick.Title)
+  if (-not $lcuPick) {
+     Write-Host "Could not find a catalog entry for LCU ($OsName $ReleaseToken $Arch) using broad search."
+     return [pscustomobject]@{}
+  }
 
+  $lcuYM = (Parse-YYYYMMFromTitle $lcuPick.Title)
   $selected['LCU'] = [pscustomobject]@{
     Category='LCU'; Title=$lcuPick.Title; KB=(Extract-KBFromTitle $lcuPick.Title); YM=$lcuYM; Item=$lcuPick
   }
 
   foreach ($cat in @('SetupDU','SafeOS','SSU','DotNet')) {
     $pick = Pick-LatestByCategoryPreferMonth -Results $results -Category $cat -PreferYYYYMM $lcuYM
-    if (-not $pick) {
-      if ($cat -in @('SSU','DotNet')) { continue }
-      Fail "Could not find a catalog entry for $cat ($OsName $ReleaseToken $Arch) using broad search."
-    }
-    $selected[$cat] = [pscustomobject]@{
-      Category=$cat; Title=$pick.Title; KB=(Extract-KBFromTitle $pick.Title); YM=(Parse-YYYYMMFromTitle $pick.Title); Item=$pick
+    if ($pick) {
+      $selected[$cat] = [pscustomobject]@{
+        Category=$cat; Title=$pick.Title; KB=(Extract-KBFromTitle $pick.Title); YM=(Parse-YYYYMMFromTitle $pick.Title); Item=$pick
+      }
     }
   }
 
@@ -1255,6 +1305,26 @@ function Ensure-AllMSUsPresent {
 }
 
 # ==============================
+# Helper functions for KB/architecture extraction
+# ==============================
+function Get-KbNumberFromPath([string]$p) {
+  $m = [regex]::Match($p, '(?i)\bkb(\d{6,8})\b')
+  if ($m.Success) { return [int]$m.Groups[1].Value }
+  return [int]::MaxValue
+}
+
+function Get-ArchFromPath([string]$p) {
+  $leaf = Split-Path -Leaf $p
+  $l = $leaf.ToLowerInvariant()
+  
+  if ($l -like '*arm64*') { return 'arm64' }
+  if ($l -like '*x64*' -or $l -like '*amd64*') { return 'x64' }
+  if ($l -like '*x86*') { return 'x86' }
+  
+  return $null
+}
+
+# ==============================
 # DU folder preparation (copy both MSU and CAB where relevant)
 # ==============================
 function Prepare-DUFolders {
@@ -1264,67 +1334,86 @@ function Prepare-DUFolders {
     [Parameter(Mandatory=$true)][object]$CatalogInfo
   )
 
-  $paths = [ordered]@{
-    CU      = Join-Path $DuRoot "CU"
-    SetupDU = Join-Path $DuRoot "SetupDU"
-    SafeOS  = Join-Path $DuRoot "SafeOS"
-    SSU     = Join-Path $DuRoot "SSU"
-    DotNet  = Join-Path $DuRoot "DotNet"
-  }
-  foreach ($p in $paths.Values) { Ensure-Folder $p }
-
-  foreach ($p in $paths.Values) {
-    try { Get-ChildItem -LiteralPath $p -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue } catch {}
-  }
-
+  # Validate that MSU files exist next to ISO
   $all = @(Get-ChildItem -LiteralPath $IsoFolder -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.msu','.cab') })
   $allPaths = @($all | Select-Object -ExpandProperty FullName)
-
-  $setupKb = $null
-  $safeKb  = $null
-  $ssuKb   = $null
-  $dotKb   = $null
-  if ($CatalogInfo -and $CatalogInfo.Selected) {
-    if ($CatalogInfo.Selected.Contains('SetupDU')) { $setupKb = $CatalogInfo.Selected['SetupDU'].KB }
-    if ($CatalogInfo.Selected.Contains('SafeOS'))  { $safeKb  = $CatalogInfo.Selected['SafeOS'].KB }
-    if ($CatalogInfo.Selected.Contains('SSU'))     { $ssuKb   = $CatalogInfo.Selected['SSU'].KB }
-    if ($CatalogInfo.Selected.Contains('DotNet'))  { $dotKb   = $CatalogInfo.Selected['DotNet'].KB }
+  if ($allPaths.Count -lt 1) {
+    Fail "No MSU/CAB files found in ISO folder: $IsoFolder. MSUs must be present to proceed."
   }
 
-  $setupFiles = @()
-  $safeFiles  = @()
-  $ssuFiles   = @()
-  $dotFiles   = @()
-
-  if ($setupKb) { $setupFiles = @($allPaths | Where-Object { $_ -match "(?i)$setupKb" }) }
-  if ($safeKb)  { $safeFiles  = @($allPaths | Where-Object { $_ -match "(?i)$safeKb" }) }
-  if ($ssuKb)   { $ssuFiles   = @($allPaths | Where-Object { $_ -match "(?i)$ssuKb" }) }
-  if ($dotKb)   { $dotFiles   = @($allPaths | Where-Object { $_ -match "(?i)$dotKb" }) }
-
-  foreach ($f in $setupFiles) { Copy-Item -Path $f -Destination $paths.SetupDU -Force }
-  foreach ($f in $safeFiles)  { Copy-Item -Path $f -Destination $paths.SafeOS  -Force }
-  foreach ($f in $ssuFiles)   { Copy-Item -Path $f -Destination $paths.SSU     -Force }
-  foreach ($f in $dotFiles)   { Copy-Item -Path $f -Destination $paths.DotNet  -Force }
-
-  # CU candidates: everything except SetupDU/SafeOS/SSU/DotNet KBs
-  $cuCandidates = @($allPaths | Where-Object { $_.ToLowerInvariant().EndsWith(".msu") })
-  foreach ($kb in @($setupKb,$safeKb,$ssuKb,$dotKb) | Where-Object { $_ }) {
-    $cuCandidates = @($cuCandidates | Where-Object { $_ -notmatch "(?i)$kb" })
+  # Clean and recreate DU root (removes stale KB folders)
+  V "Cleaning DU root structure: $DuRoot"
+  if (Test-Path $DuRoot) {
+    try { Remove-Item -Path $DuRoot -Recurse -Force -ErrorAction SilentlyContinue } catch {}
   }
-  foreach ($f in $cuCandidates) { Copy-Item -Path $f -Destination $paths.CU -Force }
+  Ensure-Folder $DuRoot
 
-  return $paths
+  # Extract KB numbers from each MSU/CAB file and organize into KB-named folders
+  # Filter by detected architecture
+  V "Organizing MSU/CAB files by KB number into: $DuRoot (filtering for $($script:State.DetectedArch))"
+  $kbMap = @{}
+  foreach ($f in $allPaths) {
+    $kb = Get-KbNumberFromPath -p $f
+    if ($kb -eq [int]::MaxValue) {
+      Write-Host ("WARNING: Could not extract KB number from {0}; skipping." -f (Split-Path -Leaf $f)) -ForegroundColor Yellow
+      continue
+    }
+    
+    # Filter by detected architecture
+    $fileArch = Get-ArchFromPath -p $f
+    if ($fileArch -and $fileArch -ne $script:State.DetectedArch) {
+      V ("Skipping {0} (arch {1} does not match detected {2})" -f (Split-Path -Leaf $f), $fileArch, $script:State.DetectedArch)
+      continue
+    }
+    
+    # Group files by KB
+    if (-not $kbMap.ContainsKey($kb)) { $kbMap[$kb] = @() }
+    $kbMap[$kb] += $f
+  }
+
+  if ($kbMap.Count -lt 1) {
+    $archMsg = "Architecture filter removed all MSU files (detected: $($script:State.DetectedArch))"
+    Write-Host "WARNING: $archMsg" -ForegroundColor Yellow
+    Write-Host "Available MSU files:" -ForegroundColor Yellow
+    foreach ($f in $allPaths) {
+      $arch = Get-ArchFromPath -p $f
+      Write-Host ("  {0} (arch: {1})" -f (Split-Path -Leaf $f), ($arch -or "unknown")) -ForegroundColor Yellow
+    }
+    Fail "No valid MSU/CAB files found after filtering. Check architecture match."
+  }
+
+  V "KB map contains: $($kbMap.Count) entries"
+  V "KB numbers: $($kbMap.Keys -join ', ')"
+  
+  # Create KB-numbered folders and copy files
+  V "Creating KB-numbered folders under DU root"
+  $kbFolders = [ordered]@{}
+  $sortedKbs = @($kbMap.Keys | Sort-Object { [int]$_ })
+  V "Sorted KB numbers: $($sortedKbs -join ', ')"
+  
+  foreach ($kb in $sortedKbs) {
+    $kb = [int]$kb  # Ensure $kb is an integer, not string
+    $kbKey = "KB$kb"  # Use string key to avoid hashtable index limits
+    V "Processing $kbKey"
+    $kbFolder = Join-Path $DuRoot $kbKey
+    Ensure-Folder $kbFolder
+    
+    $kbFolders[$kbKey] = $kbFolder
+
+    foreach ($f in $kbMap[$kb]) {
+      $fname = Split-Path -Leaf $f
+      Copy-Item -Path $f -Destination (Join-Path $kbFolder $fname) -Force
+      V ("  Copied {0} -> {1}" -f $fname, $kbKey)
+    }
+  }
+
+  Write-Host ("Organized {0} MSU/CAB files into {1} KB-numbered folders." -f $allPaths.Count, $kbFolders.Count) -ForegroundColor Cyan
+  return $kbFolders
 }
 
 # ==============================
 # Package application helpers (ordered CU + retry on 552)
 # ==============================
-function Get-KbNumberFromPath([string]$p) {
-  $m = [regex]::Match($p, '(?i)\bkb(\d{6,8})\b')
-  if ($m.Success) { return [int]$m.Groups[1].Value }
-  return [int]::MaxValue
-}
-
 function Add-PackagesByFileListToMountedImage {
   param(
     [Parameter(Mandatory=$true)][string]$MountDir,
@@ -1336,63 +1425,90 @@ function Add-PackagesByFileListToMountedImage {
 
   if (-not $PackageFiles -or $PackageFiles.Count -lt 1) { return }
 
-  $DismArgs = @(
+  $args = @(
     "/Image:$MountDir",
     "/Add-Package",
     "/ScratchDir:$ScratchRoot",
     "/LogPath:$LogPath"
   )
-  foreach ($f in $PackageFiles) { $DismArgs += "/PackagePath:$f" }
+  foreach ($f in $PackageFiles) { $args += "/PackagePath:$f" }
 
-  $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList $DismArgs -StepName $StepLabel
+  $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList $args -StepName $StepLabel
   if ($rc -ne 0) { Fail "DISM Add-Package failed (exit $rc). See log: $LogPath" }
 }
 
-function Add-CuPackagesOrdered {
+function Add-PackagesFromKBFolder {
   param(
     [Parameter(Mandatory=$true)][string]$MountDir,
-    [Parameter(Mandatory=$true)][string]$CuFolder,
+    [Parameter(Mandatory=$true)][string]$KbFolder,
+    [Parameter(Mandatory=$true)][string]$KbNumber,
     [Parameter(Mandatory=$true)][string]$ScratchRoot,
     [Parameter(Mandatory=$true)][string]$LogBasePath,
-    [string]$ContextLabel = "CU"
+    [string]$ContextLabel = "Update"
   )
 
-  $msus = @(Get-ChildItem -LiteralPath $CuFolder -Filter "*.msu" -File -ErrorAction SilentlyContinue |
-            Sort-Object @{Expression={ Get-KbNumberFromPath $_.FullName }; Ascending=$true}, Name |
-            Select-Object -ExpandProperty FullName)
+  # Collect MSU and CAB files from KB folder (may include checkpoint prerequisites)
+  $packages = @()
+  $packages += @(Get-ChildItem -LiteralPath $KbFolder -Filter "*.msu" -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -ExpandProperty FullName)
+  $packages += @(Get-ChildItem -LiteralPath $KbFolder -Filter "*.cab" -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -ExpandProperty FullName)
 
-  if ($msus.Count -lt 1) {
-    Write-Host ("No CU MSUs found in {0}; skipping." -f $CuFolder) -ForegroundColor Yellow
+  if ($packages.Count -lt 1) {
+    V ("No packages found in KB{0}; skipping." -f $KbNumber)
     return
   }
 
-  Write-Host ("Applying CU packages for {0} in KB order..." -f $ContextLabel) -ForegroundColor Cyan
-  foreach ($pkg in $msus) {
-    $leaf = Split-Path $pkg -Leaf
-    $pkgLog = $LogBasePath.Replace(".log", ("_{0}.log" -f (Sanitize-Token $leaf)))
+  V ("Installing {0} package(s) from KB{1} to {2}" -f $packages.Count, $KbNumber, $ContextLabel)
 
+  foreach ($pkg in $packages) {
+    $leaf = Split-Path $pkg -Leaf
+    $pkgLog = $LogBasePath.Replace(".log", ("_KB{0}_{1}.log" -f $KbNumber, (Sanitize-Token $leaf)))
+
+    V ("Adding package: {0}" -f $leaf)
     $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
       "/Image:$MountDir",
       "/Add-Package",
       "/PackagePath:$pkg",
       "/ScratchDir:$ScratchRoot",
       "/LogPath:$pkgLog"
-    ) -StepName ("Add-Package {0} ({1})" -f $leaf, $ContextLabel)
+    ) -StepName ("Add-Package KB{0}: {1} ({2})" -f $KbNumber, $leaf, $ContextLabel)
 
+    # DISM error 552 = "A version of this package is already installed"
+    # This can occur with checkpoint updates or when re-running; retry once
     if ($rc -eq 552) {
-      Write-Host ("DISM returned 552 for {0}. Retrying once..." -f $leaf) -ForegroundColor Yellow
+      Write-Host ("DISM returned 552 (already installed?) for KB{0}/{1}. Retrying once..." -f $KbNumber, $leaf) -ForegroundColor Yellow
       $rc2 = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
         "/Image:$MountDir",
         "/Add-Package",
         "/PackagePath:$pkg",
         "/ScratchDir:$ScratchRoot",
         "/LogPath:$pkgLog"
-      ) -StepName ("Retry Add-Package {0} ({1})" -f $leaf, $ContextLabel)
+      ) -StepName ("Retry Add-Package KB{0}: {1} ({2})" -f $KbNumber, $leaf, $ContextLabel)
       if ($rc2 -ne 0) { Fail "DISM Add-Package failed after retry (exit $rc2). See log: $pkgLog" }
     }
     elseif ($rc -ne 0) {
       Fail "DISM Add-Package failed (exit $rc). See log: $pkgLog"
     }
+  }
+}
+
+function Add-CuPackagesOrdered {
+  param(
+    [Parameter(Mandatory=$true)][string]$MountDir,
+    [Parameter(Mandatory=$true)][hashtable]$KbFolders,
+    [Parameter(Mandatory=$true)][string]$ScratchRoot,
+    [Parameter(Mandatory=$true)][string]$LogBasePath,
+    [string]$ContextLabel = "CU"
+  )
+
+  if ($KbFolders.Count -lt 1) {
+    Write-Host ("No KB folders provided for {0}; skipping." -f $ContextLabel) -ForegroundColor Yellow
+    return
+  }
+
+  # Walk KB folders in numeric order
+  Write-Host ("Applying CU packages for {0} in KB order (total {1} KBs)..." -f $ContextLabel, $KbFolders.Count) -ForegroundColor Cyan
+  foreach ($kb in ($KbFolders.Keys | Sort-Object)) {
+    Add-PackagesFromKBFolder -MountDir $MountDir -KbFolder $KbFolders[$kb] -KbNumber $kb -ScratchRoot $ScratchRoot -LogBasePath $LogBasePath -ContextLabel $ContextLabel
   }
 }
 
@@ -1404,8 +1520,7 @@ function Service-WinREInsideMountedOS {
     [Parameter(Mandatory=$true)][string]$OsMountDir,
     [Parameter(Mandatory=$true)][string]$OsName,
     [Parameter(Mandatory=$true)][int]$OsIndex,
-    [Parameter(Mandatory=$true)][string]$DuSafeOsFolder,
-    [Parameter(Mandatory=$true)][string]$DuCuFolder,
+    [Parameter(Mandatory=$true)][hashtable]$KbFolders,
     [Parameter(Mandatory=$true)][string]$ScratchRoot,
     [Parameter(Mandatory=$true)][string]$LogsRoot
   )
@@ -1429,6 +1544,7 @@ function Service-WinREInsideMountedOS {
   Ensure-ImageNotMounted -ImageFile $tmpWim -Index 1
 
   $mountLog = Join-Path $LogsRoot ("dism_mount_winre_{0}_idx{1}.log" -f $nameTag, $OsIndex)
+  V ("Mount WinRE for {0} (index {1})" -f $OsName, $OsIndex)
   $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
     "/Mount-Image",
     "/ImageFile:$tmpWim",
@@ -1444,20 +1560,12 @@ function Service-WinREInsideMountedOS {
   }
 
   try {
+    # Service WinRE with all KB packages in order
     $cuBase = Join-Path $LogsRoot ("dism_addpackage_winre_cu_{0}_idx{1}.log" -f $nameTag, $OsIndex)
-    Add-CuPackagesOrdered -MountDir $mDir -CuFolder $DuCuFolder -ScratchRoot $ScratchRoot -LogBasePath $cuBase -ContextLabel ("WinRE {0}" -f $OsName)
-
-    $safePkgs = @()
-    $safePkgs += @(Get-ChildItem -LiteralPath $DuSafeOsFolder -Filter "*.msu" -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
-    $safePkgs += @(Get-ChildItem -LiteralPath $DuSafeOsFolder -Filter "*.cab" -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
-    $safePkgs = @($safePkgs | Sort-Object -Unique)
-
-    if ($safePkgs.Count -gt 0) {
-      $safeLog = Join-Path $LogsRoot ("dism_addpackage_winre_safeos_{0}_idx{1}.log" -f $nameTag, $OsIndex)
-      Add-PackagesByFileListToMountedImage -MountDir $mDir -PackageFiles $safePkgs -ScratchRoot $ScratchRoot -LogPath $safeLog -StepLabel ("Add SafeOS DU to WinRE ({0})" -f $OsName)
-    }
+    Add-CuPackagesOrdered -MountDir $mDir -KbFolders $KbFolders -ScratchRoot $ScratchRoot -LogBasePath $cuBase -ContextLabel ("WinRE {0}" -f $OsName)
   }
   finally {
+    V ("Unmount and commit WinRE for {0} (index {1})" -f $OsName, $OsIndex)
     $rc2 = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
       "/Unmount-Image",
       "/MountDir:$mDir",
@@ -1478,7 +1586,7 @@ function Service-InstallWimIndex {
     [string]$WimPath,
     [int]$Index,
     [string]$IndexName,
-    [hashtable]$DuFolders,
+    [hashtable]$KbFolders,
     [string]$MountRoot,
     [string]$LogsRoot,
     [string]$ScratchRoot
@@ -1491,7 +1599,6 @@ function Service-InstallWimIndex {
   $mountDir = Join-Path $MountRoot ("os_{0}_idx{1}" -f $nameTag, $Index)
   $mountLog = Join-Path $LogsRoot ("dism_mount_os_{0}_idx{1}.log" -f $nameTag, $Index)
 
-  V ("Prepare mount dir for OS: {0} (index {1})" -f $IndexName, $Index)
   Invoke-Step ("Prepare mount dir for OS: $IndexName (index $Index)") {
     if (Test-Path $mountDir) { Remove-Item $mountDir -Recurse -Force -ErrorAction SilentlyContinue | Out-Null }
     New-Item -ItemType Directory -Path $mountDir -Force | Out-Null
@@ -1499,6 +1606,7 @@ function Service-InstallWimIndex {
 
   Ensure-ImageNotMounted -ImageFile $WimPath -Index $Index
 
+  V ("Mount OS image: {0} (index {1})" -f $IndexName, $Index)
   $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
     "/Mount-Image",
     "/ImageFile:$WimPath",
@@ -1514,24 +1622,15 @@ function Service-InstallWimIndex {
   }
 
   try {
-    $cuBase = Join-Path $LogsRoot ("dism_addpackage_os_cu_{0}_idx{1}.log" -f $nameTag, $Index)
-    Add-CuPackagesOrdered -MountDir $mountDir -CuFolder $DuFolders.CU -ScratchRoot $ScratchRoot -LogBasePath $cuBase -ContextLabel ("OS {0}" -f $IndexName)
+    # Apply all KB packages in numeric order to this OS image
+    $cuBase = Join-Path $LogsRoot ("dism_addpackage_os_{0}_idx{1}.log" -f $nameTag, $Index)
+    Add-CuPackagesOrdered -MountDir $mountDir -KbFolders $KbFolders -ScratchRoot $ScratchRoot -LogBasePath $cuBase -ContextLabel ("OS {0}" -f $IndexName)
 
-    if (Test-Path $DuFolders.DotNet) {
-      $dnPkgs = @()
-      $dnPkgs += @(Get-ChildItem -LiteralPath $DuFolders.DotNet -Filter "*.msu" -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
-      $dnPkgs += @(Get-ChildItem -LiteralPath $DuFolders.DotNet -Filter "*.cab" -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
-      $dnPkgs = @($dnPkgs | Sort-Object -Unique)
-
-      if ($dnPkgs.Count -gt 0) {
-        $dnLog = Join-Path $LogsRoot ("dism_addpackage_os_dotnet_{0}_idx{1}.log" -f $nameTag, $Index)
-        Add-PackagesByFileListToMountedImage -MountDir $mountDir -PackageFiles $dnPkgs -ScratchRoot $ScratchRoot -LogPath $dnLog -StepLabel ("Add .NET updates to {0}" -f $IndexName)
-      }
-    }
-
-    Service-WinREInsideMountedOS -OsMountDir $mountDir -OsName $IndexName -OsIndex $Index -DuSafeOsFolder $DuFolders.SafeOS -DuCuFolder $DuFolders.CU -ScratchRoot $ScratchRoot -LogsRoot $LogsRoot
+    # Service WinRE inside this OS image (if it exists)
+    Service-WinREInsideMountedOS -OsMountDir $mountDir -OsName $IndexName -OsIndex $Index -KbFolders $KbFolders -ScratchRoot $ScratchRoot -LogsRoot $LogsRoot
   }
   finally {
+    V ("Unmount and commit OS image: {0} (index {1})" -f $IndexName, $Index)
     $rc2 = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
       "/Unmount-Image",
       "/MountDir:$mountDir",
@@ -1545,12 +1644,13 @@ function Service-InstallWimIndex {
 function Service-BootWim {
   param(
     [Parameter(Mandatory=$true)][string]$BootWimPath,
-    [hashtable]$DuFolders,
+    [Parameter(Mandatory=$true)][hashtable]$KbFolders,
     [string]$MountRoot,
     [string]$LogsRoot,
     [string]$ScratchRoot
   )
 
+  # Boot.wim contains WinPE indices used for Setup/deployment
   $pairs = Get-WimPairs -InstallPath $BootWimPath
   $idxs = @($pairs | Select-Object -ExpandProperty Index)
 
@@ -1564,7 +1664,6 @@ function Service-BootWim {
     $mountDir = Join-Path $MountRoot ("boot_{0}_idx{1}" -f $nameTag, $idx)
     $mountLog = Join-Path $LogsRoot ("dism_mount_boot_{0}_idx{1}.log" -f $nameTag, $idx)
 
-    V ("Prepare mount dir for boot.wim: {0} (index {1})" -f $nm, $idx)
     Invoke-Step ("Prepare mount dir for boot.wim: $nm (index $idx)") {
       if (Test-Path $mountDir) { Remove-Item $mountDir -Recurse -Force -ErrorAction SilentlyContinue | Out-Null }
       New-Item -ItemType Directory -Path $mountDir -Force | Out-Null
@@ -1572,6 +1671,7 @@ function Service-BootWim {
 
     Ensure-ImageNotMounted -ImageFile $BootWimPath -Index $idx
 
+    V ("Mount boot.wim: {0} (index {1})" -f $nm, $idx)
     $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
       "/Mount-Image",
       "/ImageFile:$BootWimPath",
@@ -1587,28 +1687,12 @@ function Service-BootWim {
     }
 
     try {
-      $cuBase = Join-Path $LogsRoot ("dism_addpackage_boot_cu_{0}_idx{1}.log" -f $nameTag, $idx)
-      Add-CuPackagesOrdered -MountDir $mountDir -CuFolder $DuFolders.CU -ScratchRoot $ScratchRoot -LogBasePath $cuBase -ContextLabel ("boot.wim {0}" -f $nm)
-
-      $setupPkgs = @()
-      $setupPkgs += @(Get-ChildItem -LiteralPath $DuFolders.SetupDU -Filter "*.msu" -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
-      $setupPkgs += @(Get-ChildItem -LiteralPath $DuFolders.SetupDU -Filter "*.cab" -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
-      $setupPkgs = @($setupPkgs | Sort-Object -Unique)
-      if ($setupPkgs.Count -gt 0) {
-        $setupLog = Join-Path $LogsRoot ("dism_addpackage_boot_setupdu_{0}_idx{1}.log" -f $nameTag, $idx)
-        Add-PackagesByFileListToMountedImage -MountDir $mountDir -PackageFiles $setupPkgs -ScratchRoot $ScratchRoot -LogPath $setupLog -StepLabel ("Add Setup DU to boot.wim {0}" -f $nm)
-      }
-
-      $safePkgs = @()
-      $safePkgs += @(Get-ChildItem -LiteralPath $DuFolders.SafeOS -Filter "*.msu" -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
-      $safePkgs += @(Get-ChildItem -LiteralPath $DuFolders.SafeOS -Filter "*.cab" -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
-      $safePkgs = @($safePkgs | Sort-Object -Unique)
-      if ($safePkgs.Count -gt 0) {
-        $safeLog = Join-Path $LogsRoot ("dism_addpackage_boot_safeos_{0}_idx{1}.log" -f $nameTag, $idx)
-        Add-PackagesByFileListToMountedImage -MountDir $mountDir -PackageFiles $safePkgs -ScratchRoot $ScratchRoot -LogPath $safeLog -StepLabel ("Add SafeOS DU to boot.wim {0}" -f $nm)
-      }
+      # Apply all KB packages in numeric order to WinPE
+      $cuBase = Join-Path $LogsRoot ("dism_addpackage_boot_{0}_idx{1}.log" -f $nameTag, $idx)
+      Add-CuPackagesOrdered -MountDir $mountDir -KbFolders $KbFolders -ScratchRoot $ScratchRoot -LogBasePath $cuBase -ContextLabel ("boot.wim {0}" -f $nm)
     }
     finally {
+      V ("Unmount and commit boot.wim: {0} (index {1})" -f $nm, $idx)
       $rc2 = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
         "/Unmount-Image",
         "/MountDir:$mountDir",
@@ -1630,10 +1714,10 @@ function Build-Iso([string]$IsoRoot, [string]$OutputIso) {
   if (-not (Test-Path $efis)) { Fail "Missing UEFI boot file: $efis" }
 
   $bootdata = "2#p0,e,b$etfs#pEF,e,b$efis"
-  $OscdimgArgs = @() + $Config.OscdimgFsArgs + @("-l$($Config.IsoVolumeLabel)", "-bootdata:$bootdata", $IsoRoot, $OutputIso)
+  $args = @() + $Config.OscdimgFsArgs + @("-l$($Config.IsoVolumeLabel)", "-bootdata:$bootdata", $IsoRoot, $OutputIso)
 
   Write-Host "Building ISO: $OutputIso" -ForegroundColor Green
-  $rc = Invoke-External -FilePath $script:State.OscdimgPath -ArgumentList $OscdimgArgs -StepName "OSCDIMG Build ISO"
+  $rc = Invoke-External -FilePath $script:State.OscdimgPath -ArgumentList $args -StepName "OSCDIMG Build ISO"
   if ($rc -ne 0) { Fail "oscdimg failed with exit code $rc" }
 }
 
@@ -1675,6 +1759,8 @@ function Cleanup-Hardened {
 # Argument parsing
 # ==============================
 $FolderArg = $null
+$IsoPath = $null
+$DestIsoPath = $null
 $UseSystemTemp = $false
 $VerboseSwitch = $false
 $UseADK = $false
@@ -1693,7 +1779,7 @@ $IndicesSpec = $null
 for ($i = 0; $i -lt $args.Count; $i++) {
   $a = $args[$i]
   switch -Regex ($a) {
-    '^(?:-h|-help|-\?|/\?)$'    { Show-Usage; exit 0 }
+    '^(?:-h|-help|-\?|/\?)$'   { Show-Usage; exit 0 }
     '^(?:-UseSystemTemp)$'     { $UseSystemTemp = $true; continue }
     '^(?:-Verbose|-v)$'        { $VerboseSwitch = $true; continue }
     '^(?:-DryRun)$'            { $script:DryRun = $true; continue }
@@ -1724,6 +1810,9 @@ for ($i = 0; $i -lt $args.Count; $i++) {
     }
     '^(?:-dism)$'    { $ExplicitDism = $args[++$i]; continue }
     '^(?:-oscdimg)$' { $ExplicitOscdimg = $args[++$i]; continue }
+    '^(?:-ISO)$'     { $IsoPath = $args[++$i]; continue }
+    '^(?:-SrcISO)$'  { $IsoPath = $args[++$i]; continue }
+    '^(?:-DestISO)$' { $DestIsoPath = $args[++$i]; continue }
     '^-{1,2}.*'      { Fail "Unknown switch: $a" }
     default {
       if ($FolderArg) { Fail "Only one folder argument allowed. Extra value: $a" }
@@ -1748,7 +1837,14 @@ try {
 
   # Resolve ISO path (new run) or meta (update run)
   if (-not $UpdateISO) {
-    $script:State.IsoPath = Get-InputIso -FolderPath $folderPath
+    if ($IsoPath) {
+      $script:State.IsoPath = (Resolve-Path -LiteralPath $IsoPath -ErrorAction SilentlyContinue).Path
+      if (-not $script:State.IsoPath) { Fail "ISO file not found: $IsoPath" }
+      $isoDir = Split-Path -Parent $script:State.IsoPath
+    } else {
+      $script:State.IsoPath = Get-InputIso -FolderPath $folderPath
+      $isoDir = $folderPath
+    }
     Initialize-WorkPaths -FolderPath $folderPath -IsoPath $script:State.IsoPath -UseSystemTemp:($UseSystemTemp)
   } else {
     $workBase = if ($UseSystemTemp) { [System.IO.Path]::GetTempPath() } else { Join-Path $folderPath $Config.WorkParentSubfolder }
@@ -1771,9 +1867,18 @@ try {
     $script:State.MetaPath = $metaFiles[0].FullName
   }
 
-  if (-not $script:State.OutputIsoPath) {
+  if ($DestIsoPath) {
+    $destDir = Split-Path -Parent $DestIsoPath
+    $destDir = (Resolve-Path -LiteralPath $destDir -ErrorAction SilentlyContinue).Path
+    if (-not $destDir) { Fail "Destination directory not found: $(Split-Path -Parent $DestIsoPath)" }
+    $script:State.OutputIsoPath = Join-Path $destDir ([IO.Path]::GetFileName($DestIsoPath))
+  } elseif (-not $script:State.OutputIsoPath) {
     $baseName = [IO.Path]::GetFileNameWithoutExtension($script:State.IsoPath)
-    $script:State.OutputIsoPath = Join-Path $folderPath ($baseName + $Config.OutputIsoSuffix)
+    if ($IsoPath) {
+      $script:State.OutputIsoPath = Join-Path $isoDir ($baseName + $Config.OutputIsoSuffix)
+    } else {
+      $script:State.OutputIsoPath = Join-Path $folderPath ($baseName + $Config.OutputIsoSuffix)
+    }
   }
 
   if ($CleanWork -and (Test-Path $script:State.WorkRoot)) {
@@ -1935,45 +2040,49 @@ try {
   }
 
   # Update cache semantics
-  if ($CleanMSUs) { Clean-MsuFolder -FolderPath $folderPath }
+  if ($CleanMSUs) { Clean-MsuFolder -FolderPath $isoDir }
 
   if ($doDownload) {
     $force = [bool]$UpdateMSUs -or [bool]$CleanMSUs
     if ($force) { Write-Host "[UpdateMSUs/CleanMSUs] Forcing update download/refresh..." -ForegroundColor Yellow }
     else { Write-Host "Ensuring updates exist next to ISO (download if missing)..." -ForegroundColor Yellow }
 
-    $catalogInfo = Ensure-AllMSUsPresent -IsoFolder $folderPath -OsName $script:State.DetectedOS -ReleaseToken $script:State.DetectedRelease -Arch $script:State.DetectedArch -ForceDownload $force
+    $catalogInfo = Ensure-AllMSUsPresent -IsoFolder $isoDir -OsName $script:State.DetectedOS -ReleaseToken $script:State.DetectedRelease -Arch $script:State.DetectedArch -ForceDownload $force
   }
 
-  $localUpdates = @(Get-ChildItem -LiteralPath $folderPath -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.msu','.cab') })
-  if ($localUpdates.Count -lt 1) {
-    Fail "No update packages (.msu/.cab) available next to ISO."
-  }
+  $localUpdates = @(Get-ChildItem -LiteralPath $isoDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.msu','.cab') })
+  if ($localUpdates.Count -gt 0) {
+    # Organize MSU/CAB files into KB-numbered folders under DU/
+    # Returns hashtable of @{ [KB number] = [KB folder path] }
+    $kbFolders = Prepare-DUFolders -DuRoot $script:State.DuRoot -IsoFolder $isoDir -CatalogInfo $catalogInfo
 
-  $duFolders = Prepare-DUFolders -DuRoot $script:State.DuRoot -IsoFolder $folderPath -CatalogInfo $catalogInfo
+    # Preflight: cleanup DISM mount state before servicing
+    $bootWim = Join-Path $isoSources 'boot.wim'
+    $relevant = @($wimToService)
+    if (Test-Path $bootWim) { $relevant += $bootWim }
+    Preflight-CleanupDismMounts -RelevantImageFiles $relevant -RelevantMountRoot $script:State.MountRoot
 
-  # Preflight: cleanup DISM mount state before servicing
-  $bootWim = Join-Path $isoSources 'boot.wim'
-  $relevant = @($wimToService)
-  if (Test-Path $bootWim) { $relevant += $bootWim }
-  Preflight-CleanupDismMounts -RelevantImageFiles $relevant -RelevantMountRoot $script:State.MountRoot
+    # Service install.wim indices: mount each index, apply all KB packages in numeric order
+    V "Starting install.wim servicing"
+    $rebuiltPairs = Get-WimPairs -InstallPath $wimToService
+    $rebuiltNameMap = Get-IndexNameMap -Pairs $rebuiltPairs
+    $serviceIndexes = @($rebuiltPairs | Select-Object -ExpandProperty Index)
 
-  # Service install.wim indices
-  $rebuiltPairs = Get-WimPairs -InstallPath $wimToService
-  $rebuiltNameMap = Get-IndexNameMap -Pairs $rebuiltPairs
-  $serviceIndexes = @($rebuiltPairs | Select-Object -ExpandProperty Index)
+    Write-Host ("Servicing {0} install.wim index(es)..." -f $serviceIndexes.Count) -ForegroundColor Cyan
+    foreach ($idx in $serviceIndexes) {
+      Assert-NotCancelled
+      $nm = $rebuiltNameMap[[int]$idx]; if (-not $nm) { $nm = "<unknown>" }
+      Service-InstallWimIndex -WimPath $wimToService -Index $idx -IndexName $nm -KbFolders $kbFolders -MountRoot $script:State.MountRoot -LogsRoot $script:State.LogsRoot -ScratchRoot $script:State.ScratchRoot
+    }
 
-  foreach ($idx in $serviceIndexes) {
-    Assert-NotCancelled
-    $nm = $rebuiltNameMap[[int]$idx]; if (-not $nm) { $nm = "<unknown>" }
-    Service-InstallWimIndex -WimPath $wimToService -Index $idx -IndexName $nm -DuFolders $duFolders -MountRoot $script:State.MountRoot -LogsRoot $script:State.LogsRoot -ScratchRoot $script:State.ScratchRoot
-  }
-
-  # Service boot.wim (WinPE/Setup) with CU + SetupDU + SafeOS
-  if (Test-Path $bootWim) {
-    Service-BootWim -BootWimPath $bootWim -DuFolders $duFolders -MountRoot $script:State.MountRoot -LogsRoot $script:State.LogsRoot -ScratchRoot $script:State.ScratchRoot
-  } else {
-    Write-Host "WARNING: ISO\sources\boot.wim not found; skipping WinPE/Setup servicing." -ForegroundColor Yellow
+    # Service boot.wim (WinPE/Setup) with all KB packages in numeric order
+    if (Test-Path $bootWim) {
+      V "Starting boot.wim servicing"
+      Write-Host "Servicing boot.wim (WinPE)..." -ForegroundColor Cyan
+      Service-BootWim -BootWimPath $bootWim -KbFolders $kbFolders -MountRoot $script:State.MountRoot -LogsRoot $script:State.LogsRoot -ScratchRoot $script:State.ScratchRoot
+    } else {
+      Write-Host "WARNING: ISO\sources\boot.wim not found; skipping WinPE/Setup servicing." -ForegroundColor Yellow
+    }
   }
 
   # Build ISO
