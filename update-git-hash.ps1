@@ -1,4 +1,4 @@
-# update-git-hash.ps1
+# update-GitHashh.ps1
 
 # Get commit hash (short form)
 $commitHash = git rev-parse --short HEAD
@@ -12,9 +12,9 @@ foreach ($file in $changedFiles) {
     $lines = Get-Content $file
     $lineFound = $false
     $newLines = $lines | ForEach-Object {
-        if (-not $lineFound -and $_ -match '^\$git-hash\s*=\s*.*$') {
+        if (-not $lineFound -and $_ -match '^\$GitHash\s*=\s*.*$') {
             $lineFound = $true
-            '$git-hash = "' + $commitHash + '"'
+            '$GitHash = "' + $commitHash + '"'
         } else {
             $_
         }
