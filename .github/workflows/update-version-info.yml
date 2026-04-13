@@ -1,0 +1,29 @@
+name: Update Version Info
+
+on:
+  push:
+    branches:
+      - '**'      # Triggers on push to any branch
+
+jobs:
+  update-version:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up git for commit
+        run: |
+          git config --global user.email "actions@github.com"
+          git config --global user.name "github-actions"
+
+      - name: Run version update script
+        shell: pwsh
+        run: ./scripts/update-git-hash.ps1      # Adjust the path if needed
+
+      - name: Commit and push changes
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "ci: update version info [skip ci]"
+          file_pattern: BundledWindowsIso.ps1    # Change to your target file(s) as needed
