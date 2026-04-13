@@ -13,6 +13,9 @@ Dynamic Update (DU) alignment goal:
 DU package acquisition:
 - If DU-related MSU packages are missing next to the ISO (or if -UpdateMSUs is specified), the script uses MSCatalogLTS to search the Microsoft Update Catalog and download the appropriate packages into the same folder as the ISO. MSCatalogLTS provides commands for searching and downloading updates from the Microsoft Update Catalog. [2](https://www.deploymentresearch.com/removing-applications-from-your-windows-11-image-before-and-during-deployment/)[3](https://thedotsource.com/2021/03/16/building-iso-files-with-powershell-7/)
 - The downloaded packages are saved alongside the ISO so they are reusable across runs and can be applied to the staged media.
+- Update packages are selected strictly by the OS build number detected from the ISO (not by release name). This makes the script robust for any new Windows release without requiring code maintenance for version naming.
+- For LCUs: if multiple cumulative updates are found for the detected build, all are downloaded (in oldest-to-newest order) to support checkpoint cumulative update chains; otherwise just the latest is used.
+- For Setup DU, SafeOS DU, SSU, and .NET: the latest applicable package is selected, preferring the same month as the latest LCU.
 
 DU package application targets:
 Properly updating installation media involves operating on multiple target images. Microsoft identifies the primary targets as: [1](https://learn.microsoft.com/en-us/windows/deployment/update/media-dynamic-update)
@@ -27,9 +30,9 @@ This script refreshes the media by applying the DU package types Microsoft docum
 - Safe OS Dynamic Update (SafeOS DU): updates the safe operating system used for the recovery environment (WinRE). [1](https://learn.microsoft.com/en-us/windows/deployment/update/media-dynamic-update)
 - Servicing stack requirements: modern LCUs often embed the servicing stack; separate servicing stack packages may exist only when required. [1](https://learn.microsoft.com/en-us/windows/deployment/update/media-dynamic-update)
 
-Checkpoint cumulative updates (Windows 11 24H2+):
-- Starting with Windows 11, version 24H2 (and Windows Server 2025), the latest cumulative update might have a prerequisite cumulative update that must be installed first (“checkpoint cumulative updates”). The Microsoft guidance describes using a package folder containing only the target cumulative update and checkpoints to allow discovery and installation as needed. [1](https://learn.microsoft.com/en-us/windows/deployment/update/media-dynamic-update)
-- When acquiring DU packages, Microsoft guidance also recommends ensuring DU packages correspond to the same month as the latest cumulative update; if a DU package isn’t available for that month, use the most recently published version. [1](https://learn.microsoft.com/en-us/windows/deployment/update/media-dynamic-update)
+Checkpoint cumulative updates:
+- When the catalog search for the detected build number returns multiple LCU entries, all are downloaded in oldest-to-newest order to ensure the full checkpoint chain is available. The existing KB-ordered application logic applies them in the correct sequence. [1](https://learn.microsoft.com/en-us/windows/deployment/update/media-dynamic-update)
+- When acquiring DU packages, Microsoft guidance also recommends ensuring DU packages correspond to the same month as the latest cumulative update; if a DU package is not available for that month, use the most recently published version. [1](https://learn.microsoft.com/en-us/windows/deployment/update/media-dynamic-update)
 
 Drivers on media:
 - The script creates a special folder at the root of the staged ISO named "$WinpeDriver$". Windows Setup can scan this folder for driver INF files during installation. [4](https://learn.microsoft.com/en-us/windows-hardware/customize/desktop/unattend/microsoft-windows-pnpcustomizationswinpe-driverpaths)[5](https://community.spiceworks.com/t/autounattend-xml-driver-path-issue-for-windows-11-24h2-and-25h2/1244985)
@@ -233,7 +236,7 @@ endlocal
 '@
 
   #CatalogBroadQueryTemplate = '{0} {1}'
-  CatalogBroadQueryTemplate = '{0}, version {1} for {2}-based Systems'
+  CatalogBroadQueryTemplate = '{0} {1} for {2}-based Systems'
   CatalogCategoryMatchers = [ordered]@{
     LCU     = '(?i)\bCumulative Update\b'
     SetupDU = '(?i)\bSetup Dynamic Update\b'
@@ -281,7 +284,6 @@ $script:State = [ordered]@{
 
   DetectedOS        = $null
   DetectedArch      = $null
-  DetectedRelease   = $null
   DetectedBuild     = $null
 }
 
@@ -358,7 +360,6 @@ function Show-RunBanner {
   Write-Host "Detected media:" -ForegroundColor Cyan
   Write-Host ("  OS:       {0}" -f $script:State.DetectedOS) -ForegroundColor Cyan
   Write-Host ("  Arch:     {0}" -f $script:State.DetectedArch) -ForegroundColor Cyan
-  Write-Host ("  Release:  {0}" -f $script:State.DetectedRelease) -ForegroundColor Cyan
   if ($script:State.DetectedBuild) { Write-Host ("  Build:    {0}" -f $script:State.DetectedBuild) -ForegroundColor Cyan }
   Write-Host ""
 }
@@ -1071,49 +1072,18 @@ function Get-MediaInfoFromInstallWim {
     else { $arch = 'x64' }
   }
 
-  $release = $null
-  $base = $script:State.IsoBaseName
-  $m = [regex]::Match($base, '(?i)(?:^|[^0-9A-Za-z])(2[0-9]H[1-2])(?:[^0-9A-Za-z]|$)')
-  if ($m.Success) { $release = $m.Groups[1].Value.ToUpperInvariant() }
-
   if ($sampleName -match '(?i)Windows\s+11') {
     $os = "Windows 11"
-    if (-not $release -and $build) {
-      if ($build -ge 28000) { $release = "26H1" }
-      elseif ($build -ge 26200) { $release = "25H2" }
-      elseif ($build -ge 26100) { $release = "24H2" }
-      elseif ($build -ge 22631) { $release = "23H2" }
-      elseif ($build -ge 22621) { $release = "22H2" }
-      else { $release = "21H1" }
-    }
   } elseif ($sampleName -match '(?i)Windows\s+10') {
     $os = "Windows 10"
-    if (-not $release -and $build) {
-      if ($build -ge 19045) { $release = "22H2" }
-      elseif ($build -eq 19044) { $release = "21H2" }
-      elseif ($build -eq 19043) { $release = "21H1" }
-      elseif ($build -eq 19042) { $release = "20H2" }
-      elseif ($build -eq 19041) { $release = "2004" }
-      elseif ($build -ge 18363) { $release = "1909" }
-      elseif ($build -eq 18362) { $release = "1903" }
-      elseif ($build -ge 17763) { $release = "1809" }
-      elseif ($build -ge 17134) { $release = "1803" }
-      elseif ($build -ge 16299) { $release = "1709" }
-      elseif ($build -ge 15063) { $release = "1703" }
-      elseif ($build -ge 14393) { $release = "1607" }
-      elseif ($build -ge 10586) { $release = "1511" }
-      else { $release = "1507" }
-    }
   } elseif ($sampleName -match '(?i)Windows\s+8.1') {
     $os = "Windows 8.1"
   } else {
     $os = "Windows"
   }
-  if (-not $release -and $build) { $release = $build }
 
   $script:State.DetectedOS = $os
   $script:State.DetectedArch = $arch
-  $script:State.DetectedRelease = $release
   $script:State.DetectedBuild = $build
 }
 
@@ -1195,11 +1165,11 @@ function Save-CatalogUpdateAllFiles {
 function Get-CatalogCandidatesBroad {
   param(
     [Parameter(Mandatory=$true)][string]$OsName,
-    [Parameter(Mandatory=$true)][string]$ReleaseToken,
+    [Parameter(Mandatory=$true)][int]$OsBuild,
     [Parameter(Mandatory=$true)][string]$Arch
   )
 
-  $broad = ($Config.CatalogBroadQueryTemplate -f $OsName, $ReleaseToken, $Arch)
+  $broad = ($Config.CatalogBroadQueryTemplate -f $OsName, $OsBuild, $Arch)
   Write-Host ("Catalog broad search: {0}" -f $broad) -ForegroundColor Cyan
   try {
     $res = @(Get-MSCatalogUpdate -Search $broad -Architecture $Arch -IncludeDynamic -AllPages)
@@ -1242,11 +1212,33 @@ function Select-LatestByCategoryPreferMonth {
   return ($filtered | Sort-Object LastUpdated -Descending | Select-Object -First 1)
 }
 
+function Get-AllByCategoryFiltered {
+  param(
+    [Parameter(Mandatory=$true)][object[]]$Results,
+    [Parameter(Mandatory=$true)][ValidateSet('LCU','SetupDU','SafeOS','SSU','DotNet')][string]$Category
+  )
+
+  $rx = $Config.CatalogCategoryMatchers[$Category]
+
+  $filtered = @(
+    $Results |
+      Where-Object { $_.Title } |
+      Where-Object { -not (Test-TitleExcluded $_.Title) } |
+      Where-Object { $_.Title -match $rx }
+  )
+
+  if ($Category -ne 'DotNet') {
+    $filtered = @($filtered | Where-Object { $_.Title -notmatch $Config.CatalogCategoryMatchers.DotNet })
+  }
+
+  return $filtered
+}
+
 function Initialize-AllMSUsPresent {
   param(
     [Parameter(Mandatory=$true)][string]$IsoFolder,
     [Parameter(Mandatory=$true)][string]$OsName,
-    [Parameter(Mandatory=$true)][string]$ReleaseToken,
+    [Parameter(Mandatory=$true)][int]$OsBuild,
     [Parameter(Mandatory=$true)][string]$Arch,
     [Parameter(Mandatory=$true)][bool]$ForceDownload
   )
@@ -1261,9 +1253,9 @@ function Initialize-AllMSUsPresent {
     return [pscustomobject]@{ Selected=[ordered]@{}; Downloaded=@() }
   }
 
-  $results = Get-CatalogCandidatesBroad -OsName $OsName -ReleaseToken $ReleaseToken -Arch $Arch
+  $results = Get-CatalogCandidatesBroad -OsName $OsName -OsBuild $OsBuild -Arch $Arch
   if ($results.Count -lt 1) {
-    Write-Host "Catalog broad search returned no results for $OsName, version $ReleaseToken, $Arch."
+    Write-Host "Catalog broad search returned no results for $OsName build $OsBuild, $Arch."
      return [pscustomobject]@{}
   }
 
@@ -1276,41 +1268,59 @@ function Initialize-AllMSUsPresent {
 
   $selected = [ordered]@{}
 
-  $lcuPick = Select-LatestByCategoryPreferMonth -Results $results -Category 'LCU' -PreferYYYYMM $null
-  if (-not $lcuPick) {
-     Write-Host "Could not find a catalog entry for LCU ($OsName $ReleaseToken $Arch) using broad search."
+  # Collect all LCU candidates for this build. When multiple are present they form a
+  # checkpoint cumulative update chain (newer LCU requires an earlier LCU as a prerequisite).
+  # Download all of them sorted oldest-first so the full chain is available; just the latest
+  # is used when only one is found (no checkpoint chain required).
+  $lcuAll = @(Get-AllByCategoryFiltered -Results $results -Category 'LCU')
+  if ($lcuAll.Count -lt 1) {
+     Write-Host "Could not find any catalog entries for LCU ($OsName build $OsBuild $Arch) using broad search."
      return [pscustomobject]@{}
   }
 
-  $lcuYM = (Get-YYYYMMFromTitle $lcuPick.Title)
-  $selected['LCU'] = [pscustomobject]@{
-    Category='LCU'; Title=$lcuPick.Title; KB=(Get-KBFromTitle $lcuPick.Title); YM=$lcuYM; Item=$lcuPick
+  $lcuLatest = ($lcuAll | Sort-Object LastUpdated -Descending | Select-Object -First 1)
+  $lcuYM = (Get-YYYYMMFromTitle $lcuLatest.Title)
+
+  # Build structured entry objects from a list of raw catalog items
+  $makeLcuEntries = { param($items) @($items | ForEach-Object {
+    [pscustomobject]@{ Category='LCU'; Title=$_.Title; KB=(Get-KBFromTitle $_.Title); YM=(Get-YYYYMMFromTitle $_.Title); Item=$_ }
+  }) }
+
+  if ($lcuAll.Count -gt 1) {
+    Write-Host ("Found {0} LCU entries for build {1}; downloading full checkpoint chain." -f $lcuAll.Count, $OsBuild) -ForegroundColor Cyan
+    $selected['LCU'] = & $makeLcuEntries ($lcuAll | Sort-Object LastUpdated)
+  } else {
+    $selected['LCU'] = & $makeLcuEntries $lcuAll
   }
 
   foreach ($cat in @('SetupDU','SafeOS','SSU','DotNet')) {
     $pick = Select-LatestByCategoryPreferMonth -Results $results -Category $cat -PreferYYYYMM $lcuYM
     if ($pick) {
-      $selected[$cat] = [pscustomobject]@{
+      $selected[$cat] = @([pscustomobject]@{
         Category=$cat; Title=$pick.Title; KB=(Get-KBFromTitle $pick.Title); YM=(Get-YYYYMMFromTitle $pick.Title); Item=$pick
-      }
+      })
     }
   }
 
   $before = @(Get-ChildItem -LiteralPath $IsoFolder -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
 
   if ($VerbosePreference -eq 'Continue') {
-    foreach ($c in $selected.Keys) { Write-Host ("  {0}: {1}" -f $c, $selected[$c].Title) -ForegroundColor Cyan }
+    foreach ($c in $selected.Keys) {
+      foreach ($entry in $selected[$c]) { Write-Host ("  {0}: {1}" -f $c, $entry.Title) -ForegroundColor Cyan }
+    }
     Write-Host ""
   }
 
-  Write-Host "Downloading updates to ISO folder (includes checkpoint prerequisites when present)..." -ForegroundColor Cyan
+  Write-Host "Downloading updates to ISO folder..." -ForegroundColor Cyan
   foreach ($cat in $selected.Keys) {
-    $t = $selected[$cat].Title
-    Write-Host ("Downloading ({0}): {1}" -f $cat, $t) -ForegroundColor Cyan
-    try {
-      Save-CatalogUpdateAllFiles -CatalogItem $selected[$cat].Item -DestinationFolder $IsoFolder
-    } catch {
-      Stop-Script "Download failed for '$t': $($_.Exception.Message)"
+    foreach ($entry in $selected[$cat]) {
+      $t = $entry.Title
+      Write-Host ("Downloading ({0}): {1}" -f $cat, $t) -ForegroundColor Cyan
+      try {
+        Save-CatalogUpdateAllFiles -CatalogItem $entry.Item -DestinationFolder $IsoFolder
+      } catch {
+        Stop-Script "Download failed for '$t': $($_.Exception.Message)"
+      }
     }
   }
 
@@ -2030,7 +2040,11 @@ try {
     if ($force) { Write-Host "[UpdateMSUs/CleanMSUs] Forcing update download/refresh..." -ForegroundColor Yellow }
     else { Write-Host "Ensuring updates exist next to ISO (download if missing)..." -ForegroundColor Yellow }
 
-    $catalogInfo = Initialize-AllMSUsPresent -IsoFolder $isoDir -OsName $script:State.DetectedOS -ReleaseToken $script:State.DetectedRelease -Arch $script:State.DetectedArch -ForceDownload $force
+    if (-not $script:State.DetectedBuild) {
+      Stop-Script "Could not detect OS build number from ISO. Cannot query update catalog."
+    }
+
+    $catalogInfo = Initialize-AllMSUsPresent -IsoFolder $isoDir -OsName $script:State.DetectedOS -OsBuild $script:State.DetectedBuild -Arch $script:State.DetectedArch -ForceDownload $force
   }
 
   $localUpdates = @(Get-ChildItem -LiteralPath $isoDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.msu','.cab') })
