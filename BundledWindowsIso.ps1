@@ -923,6 +923,7 @@ function Initialize-StashedInstallWim {
   if (Test-Path $wim) { Remove-Item -Path $wim -Force -ErrorAction SilentlyContinue | Out-Null }
 
   foreach ($idx in $indexes) {
+    Assert-NotCancelled
     $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
       "/Export-Image",
       "/SourceImageFile:$esd",
@@ -2101,7 +2102,7 @@ try {
   Write-Host ("  " + $script:State.WorkRoot) -ForegroundColor Yellow
 }
 catch [System.OperationCanceledException] {
-  Write-Host "Operation cancelled." -ForegroundColor Yellow
+  if (-not $script:Cancelled) { Write-Host "Operation cancelled." -ForegroundColor Yellow }
 }
 finally {
   Clear-Hardened -Aggressive:($script:Cancelled) -FromCancel:($script:Cancelled)
