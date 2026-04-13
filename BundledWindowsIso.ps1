@@ -235,8 +235,6 @@ echo.
 endlocal
 '@
 
-  #CatalogBroadQueryTemplate = '{0} {1}'
-  CatalogBroadQueryTemplate = '{0} {1} for {2}-based Systems'
   CatalogCategoryMatchers = [ordered]@{
     LCU     = '(?i)\bCumulative Update\b'
     SetupDU = '(?i)\bSetup Dynamic Update\b'
@@ -1169,7 +1167,7 @@ function Get-CatalogCandidatesBroad {
     [Parameter(Mandatory=$true)][string]$Arch
   )
 
-  $broad = ($Config.CatalogBroadQueryTemplate -f $OsName, $OsBuild, $Arch)
+  $broad = "$OsName $OsBuild for $Arch-based Systems"
   Write-Host ("Catalog broad search: {0}" -f $broad) -ForegroundColor Cyan
   try {
     $res = @(Get-MSCatalogUpdate -Search $broad -Architecture $Arch -IncludeDynamic -AllPages)
