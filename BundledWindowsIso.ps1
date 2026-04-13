@@ -227,7 +227,8 @@ echo.
 endlocal
 '@
 
-  CatalogBroadQueryTemplate = '{0} {1}'
+  #CatalogBroadQueryTemplate = '{0} {1}'
+  CatalogBroadQueryTemplate = '{0}, version {1} for {2}-based Systems'
   CatalogCategoryMatchers = [ordered]@{
     LCU     = '(?i)\bCumulative Update\b'
     SetupDU = '(?i)\bSetup Dynamic Update\b'
@@ -387,6 +388,7 @@ function Register-CancelHandler {
     [Console]::add_CancelKeyPress($handler)
     $script:CancelHandlerRegistered = $true
   } catch {
+    try { Write-Host "Failed to install cancel handler" -ForegroundColor Yellow } catch {}
     $script:CancelHandlerRegistered = $false
   }
 }
@@ -1262,6 +1264,10 @@ function Ensure-AllMSUsPresent {
 
   Write-Host ("Search completed for broad query; found {0} updates" -f $results.Count) -ForegroundColor Cyan
   Write-Host ""
+  if ($VerbosePreference -eq 'Continue') {
+    foreach ($r in $results) { Write-Host ("  {0}" -f $r.Title) -ForegroundColor Cyan }
+    Write-Host ""
+  }
 
   $selected = [ordered]@{}
 
@@ -1286,6 +1292,11 @@ function Ensure-AllMSUsPresent {
   }
 
   $before = @(Get-ChildItem -LiteralPath $IsoFolder -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+
+  if ($VerbosePreference -eq 'Continue') {
+    foreach ($c in $selected.Keys) { Write-Host ("  {0}: {1}" -f $c, $selected[$c].Title) -ForegroundColor Cyan }
+    Write-Host ""
+  }
 
   Write-Host "Downloading updates to ISO folder (includes checkpoint prerequisites when present)..." -ForegroundColor Cyan
   foreach ($cat in $selected.Keys) {
