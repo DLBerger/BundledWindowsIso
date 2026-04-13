@@ -1436,10 +1436,14 @@ function Add-PackagesByFileListToMountedImage {
     [Parameter(Mandatory=$true)][string[]]$PackageFiles,
     [Parameter(Mandatory=$true)][string]$ScratchRoot,
     [Parameter(Mandatory=$true)][string]$LogPath,
-    [string]$StepLabel = "Add-Package"
+    [string]$StepLabel = "Add-Package",
+    [switch]$PassThru
   )
 
-  if (-not $PackageFiles -or $PackageFiles.Count -lt 1) { return }
+  if (-not $PackageFiles -or $PackageFiles.Count -lt 1) {
+    if ($PassThru) { return 0 }
+    return
+  }
 
   $args = @(
     "/Image:$MountDir",
@@ -1450,7 +1454,11 @@ function Add-PackagesByFileListToMountedImage {
   foreach ($f in $PackageFiles) { $args += "/PackagePath:$f" }
 
   $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList $args -StepName $StepLabel
-  if ($rc -ne 0) { Stop-Script "DISM Add-Package failed (exit $rc). See log: $LogPath" }
+  if ($rc -ne 0) {
+    if ($PassThru) { return $rc }
+    Stop-Script "DISM Add-Package failed (exit $rc). See log: $LogPath"
+  }
+  if ($PassThru) { return 0 }
 }
 
 function Add-PackagesFromKBFolder {
@@ -1521,22 +1529,49 @@ function Add-CuPackagesOrdered {
     return
   }
 
-  # Gather all package files from KB folders in numeric KB order
   Write-Host ("Applying CU packages for {0} in KB order (total {1} KBs)..." -f $ContextLabel, $KbFolders.Count) -ForegroundColor Cyan
-  $allPackageFiles = @()
+
+  $succeeded = @()
+  $failed    = @()
+
   foreach ($kb in ($KbFolders.Keys | Sort-Object)) {
     $kbFolder = $KbFolders[$kb]
-    $allPackageFiles += @(Get-ChildItem -LiteralPath $kbFolder -Filter "*.msu" -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -ExpandProperty FullName)
-    $allPackageFiles += @(Get-ChildItem -LiteralPath $kbFolder -Filter "*.cab" -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -ExpandProperty FullName)
+    $pkgFiles = @()
+    $pkgFiles += @(Get-ChildItem -LiteralPath $kbFolder -Filter "*.msu" -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -ExpandProperty FullName)
+    $pkgFiles += @(Get-ChildItem -LiteralPath $kbFolder -Filter "*.cab" -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -ExpandProperty FullName)
+
+    foreach ($pkg in $pkgFiles) {
+      $leaf   = Split-Path $pkg -Leaf
+      $pkgLog = $LogBasePath.Replace(".log", ("_KB{0}_{1}.log" -f $kb, (Protect-Token $leaf)))
+      $label  = ("Add-Package {0} KB{1}: {2}" -f $ContextLabel, $kb, $leaf)
+
+      Write-Verbose ("Adding package: KB{0} / {1}" -f $kb, $leaf)
+      $rc = Add-PackagesByFileListToMountedImage -MountDir $MountDir -PackageFiles @($pkg) -ScratchRoot $ScratchRoot -LogPath $pkgLog -StepLabel $label -PassThru
+
+      if ($rc -eq 0) {
+        $succeeded += $pkg
+      } else {
+        Write-Host ("WARNING: Failed to add KB{0}/{1} (exit {2}); skipping. See log: {3}" -f $kb, $leaf, $rc, $pkgLog) -ForegroundColor Yellow
+        $failed += $pkg
+      }
+    }
   }
 
-  if ($allPackageFiles.Count -lt 1) {
+  $total = $succeeded.Count + $failed.Count
+  if ($total -eq 0) {
     Write-Host ("No packages found for {0}; skipping." -f $ContextLabel) -ForegroundColor Yellow
     return
   }
 
-  # Apply all packages in a single DISM invocation
-  Add-PackagesByFileListToMountedImage -MountDir $MountDir -PackageFiles $allPackageFiles -ScratchRoot $ScratchRoot -LogPath $LogBasePath -StepLabel ("Add-Package {0}" -f $ContextLabel)
+  Write-Host ""
+  Write-Host ("Package apply summary for {0}:" -f $ContextLabel) -ForegroundColor Cyan
+  Write-Host ("  Succeeded: {0}" -f $succeeded.Count) -ForegroundColor Green
+  foreach ($s in $succeeded) { Write-Verbose ("    OK: {0}" -f $s) }
+  if ($failed.Count -gt 0) {
+    Write-Host ("  Failed:    {0}" -f $failed.Count) -ForegroundColor Yellow
+    foreach ($f in $failed) { Write-Host ("    FAILED: {0}" -f $f) -ForegroundColor Yellow }
+  }
+  Write-Host ""
 }
 
 # ==============================
