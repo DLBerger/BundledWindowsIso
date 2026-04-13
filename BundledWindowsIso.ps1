@@ -159,7 +159,7 @@ $script:Name = "BundledWindowsIso.ps1"
 # ==============================
 # git information
 # ==============================
-$GitHash = "62d92c6"
+$GitHash = "9a2365f"
 
 # ==============================
 # Script identity
@@ -1428,85 +1428,8 @@ function Initialize-DUFolders {
 }
 
 # ==============================
-# Package application helpers (ordered CU + retry on 552)
+# Package application helpers (ordered CU)
 # ==============================
-function Add-PackagesByFileListToMountedImage {
-  param(
-    [Parameter(Mandatory=$true)][string]$MountDir,
-    [Parameter(Mandatory=$true)][string[]]$PackageFiles,
-    [Parameter(Mandatory=$true)][string]$ScratchRoot,
-    [Parameter(Mandatory=$true)][string]$LogPath,
-    [string]$StepLabel = "Add-Package"
-  )
-
-  if (-not $PackageFiles -or $PackageFiles.Count -lt 1) { return }
-
-  $args = @(
-    "/Image:$MountDir",
-    "/Add-Package",
-    "/ScratchDir:$ScratchRoot",
-    "/LogPath:$LogPath"
-  )
-  foreach ($f in $PackageFiles) { $args += "/PackagePath:$f" }
-
-  $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList $args -StepName $StepLabel
-  if ($rc -ne 0) { Stop-Script "DISM Add-Package failed (exit $rc). See log: $LogPath" }
-}
-
-function Add-PackagesFromKBFolder {
-  param(
-    [Parameter(Mandatory=$true)][string]$MountDir,
-    [Parameter(Mandatory=$true)][string]$KbFolder,
-    [Parameter(Mandatory=$true)][string]$KbNumber,
-    [Parameter(Mandatory=$true)][string]$ScratchRoot,
-    [Parameter(Mandatory=$true)][string]$LogBasePath,
-    [string]$ContextLabel = "Update"
-  )
-
-  # Collect MSU and CAB files from KB folder (may include checkpoint prerequisites)
-  $packages = @()
-  $packages += @(Get-ChildItem -LiteralPath $KbFolder -Filter "*.msu" -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -ExpandProperty FullName)
-  $packages += @(Get-ChildItem -LiteralPath $KbFolder -Filter "*.cab" -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -ExpandProperty FullName)
-
-  if ($packages.Count -lt 1) {
-    Write-Verbose ("No packages found in KB{0}; skipping." -f $KbNumber)
-    return
-  }
-
-  Write-Verbose ("Installing {0} package(s) from KB{1} to {2}" -f $packages.Count, $KbNumber, $ContextLabel)
-
-  foreach ($pkg in $packages) {
-    $leaf = Split-Path $pkg -Leaf
-    $pkgLog = $LogBasePath.Replace(".log", ("_KB{0}_{1}.log" -f $KbNumber, (Protect-Token $leaf)))
-
-    Write-Verbose ("Adding package: {0}" -f $leaf)
-    $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
-      "/Image:$MountDir",
-      "/Add-Package",
-      "/PackagePath:$pkg",
-      "/ScratchDir:$ScratchRoot",
-      "/LogPath:$pkgLog"
-    ) -StepName ("Add-Package KB{0}: {1} ({2})" -f $KbNumber, $leaf, $ContextLabel)
-
-    # DISM error 552 = "A version of this package is already installed"
-    # This can occur with checkpoint updates or when re-running; retry once
-    if ($rc -eq 552) {
-      Write-Host ("DISM returned 552 (already installed?) for KB{0}/{1}. Retrying once..." -f $KbNumber, $leaf) -ForegroundColor Yellow
-      $rc2 = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
-        "/Image:$MountDir",
-        "/Add-Package",
-        "/PackagePath:$pkg",
-        "/ScratchDir:$ScratchRoot",
-        "/LogPath:$pkgLog"
-      ) -StepName ("Retry Add-Package KB{0}: {1} ({2})" -f $KbNumber, $leaf, $ContextLabel)
-      if ($rc2 -ne 0) { Stop-Script "DISM Add-Package failed after retry (exit $rc2). See log: $pkgLog" }
-    }
-    elseif ($rc -ne 0) {
-      Stop-Script "DISM Add-Package failed (exit $rc). See log: $pkgLog"
-    }
-  }
-}
-
 function Add-CuPackagesOrdered {
   param(
     [Parameter(Mandatory=$true)][string]$MountDir,
@@ -1521,22 +1444,55 @@ function Add-CuPackagesOrdered {
     return
   }
 
-  # Gather all package files from KB folders in numeric KB order
   Write-Host ("Applying CU packages for {0} in KB order (total {1} KBs)..." -f $ContextLabel, $KbFolders.Count) -ForegroundColor Cyan
-  $allPackageFiles = @()
+
+  $succeeded = @()
+  $failed    = @()
+
   foreach ($kb in ($KbFolders.Keys | Sort-Object)) {
     $kbFolder = $KbFolders[$kb]
-    $allPackageFiles += @(Get-ChildItem -LiteralPath $kbFolder -Filter "*.msu" -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -ExpandProperty FullName)
-    $allPackageFiles += @(Get-ChildItem -LiteralPath $kbFolder -Filter "*.cab" -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -ExpandProperty FullName)
+    $pkgFiles = @()
+    $pkgFiles += @(Get-ChildItem -LiteralPath $kbFolder -Filter "*.msu" -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -ExpandProperty FullName)
+    $pkgFiles += @(Get-ChildItem -LiteralPath $kbFolder -Filter "*.cab" -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -ExpandProperty FullName)
+
+    foreach ($pkg in $pkgFiles) {
+      $leaf   = Split-Path $pkg -Leaf
+      $pkgLog = $LogBasePath.Replace(".log", ("_KB{0}_{1}.log" -f $kb, (Protect-Token $leaf)))
+      $label  = ("Add-Package {0} KB{1}: {2}" -f $ContextLabel, $kb, $leaf)
+
+      Write-Verbose ("Adding package: KB{0} / {1}" -f $kb, $leaf)
+      $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
+        "/Image:$MountDir",
+        "/Add-Package",
+        "/PackagePath:$pkg",
+        "/ScratchDir:$ScratchRoot",
+        "/LogPath:$pkgLog"
+      ) -StepName $label
+
+      if ($rc -eq 0) {
+        $succeeded += $pkg
+      } else {
+        Write-Host ("WARNING: Failed to add KB{0}/{1} (exit {2}); skipping. See log: {3}" -f $kb, $leaf, $rc, $pkgLog) -ForegroundColor Yellow
+        $failed += $pkg
+      }
+    }
   }
 
-  if ($allPackageFiles.Count -lt 1) {
+  $total = $succeeded.Count + $failed.Count
+  if ($total -eq 0) {
     Write-Host ("No packages found for {0}; skipping." -f $ContextLabel) -ForegroundColor Yellow
     return
   }
 
-  # Apply all packages in a single DISM invocation
-  Add-PackagesByFileListToMountedImage -MountDir $MountDir -PackageFiles $allPackageFiles -ScratchRoot $ScratchRoot -LogPath $LogBasePath -StepLabel ("Add-Package {0}" -f $ContextLabel)
+  Write-Host ""
+  Write-Host ("Package apply summary for {0}:" -f $ContextLabel) -ForegroundColor Cyan
+  Write-Host ("  Succeeded: {0}" -f $succeeded.Count) -ForegroundColor Green
+  foreach ($s in $succeeded) { Write-Verbose ("    OK: {0}" -f $s) }
+  if ($failed.Count -gt 0) {
+    Write-Host ("  Failed:    {0}" -f $failed.Count) -ForegroundColor Yellow
+    foreach ($f in $failed) { Write-Host ("    FAILED: {0}" -f $f) -ForegroundColor Yellow }
+  }
+  Write-Host ""
 }
 
 # ==============================
