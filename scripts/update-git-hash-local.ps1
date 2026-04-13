@@ -11,6 +11,7 @@ powershell -ExecutionPolicy Bypass -File scripts/update-git-hash-local.ps1
 
 # Get commit hash (short form)
 $commitHash = git rev-parse --short HEAD
+Write-Host "Current commit hash: $commitHash"
 
 # Get files changed in the latest commit (ignore deleted files)
 $changedFiles = git diff-tree --no-commit-id --name-only -r HEAD | Where-Object {
@@ -20,6 +21,7 @@ $changedFiles = git diff-tree --no-commit-id --name-only -r HEAD | Where-Object 
 $commitAmended = $false
 
 foreach ($file in $changedFiles) {
+    Write-Host "Scanning file: $targetFile"
     $lines = Get-Content $file
     $lineFound = $false
     $newLines = $lines | ForEach-Object {
@@ -32,6 +34,7 @@ foreach ($file in $changedFiles) {
         }
     }
     if ($lineFound) {
+        Write-Host "Updating $targetFile with the new commit hash"
         Set-Content -Path $file -Value $newLines
         git add $file
         $commitAmended = $true
