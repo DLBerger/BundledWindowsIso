@@ -153,8 +153,13 @@ Shows install.wim indices and exits.
 #>
 
 # ==============================
-# BundledWindowsIso.ps1
+$script:Name = "BundledWindowsIso.ps1"
 # ==============================
+
+# ==============================
+# git information
+# ==============================
+$GitHash = "d47ad17"
 
 # ==============================
 # Script identity
@@ -299,9 +304,10 @@ function Sanitize-Token([string]$s) {
 }
 
 function Show-Usage {
-  $name = if ($script:ScriptPath) { Split-Path -Leaf $script:ScriptPath } else { 'BundledWindowsIso.ps1' }
+  $name = if ($script:ScriptPath) { Split-Path -Leaf $script:ScriptPath } else { $script:Name }
   Write-Host ""
-  Write-Host "$name usage:" -ForegroundColor Cyan
+  Write-Host "$name ($GitHash)" -ForegroundColor Cyan
+  Write-Host "Usage:" -ForegroundColor Cyan
   Write-Host "  & '$name' [<Folder>] [-ISO <path>] [-DestISO <path>] [-Home|-Pro|-Indices <spec>] [-CleanWork] [-UpdateISO] [-UpdateMSUs] [-CleanMSUs] [-DryRun] [-Verbose]" -ForegroundColor Cyan
   Write-Host "  & '$name' -ShowIndices [-ISO <path>]" -ForegroundColor Cyan
   Write-Host ""
