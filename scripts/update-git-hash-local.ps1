@@ -1,21 +1,43 @@
-# update-git-hash.ps1 (CI-compatible)
+# update-git-hash-local.ps1
 
-# Use GitHub Actions SHA if running in GitHub Actions, otherwise use local git hash
-$commitHash = if ($env:GITHUB_SHA) { $env:GITHUB_SHA.Substring(0,7) } else { git rev-parse --short HEAD }
+<#
+To use this with local git commits you need to put the following
+in .git/hook/post-commit:
 
-$targetFile = "BundledWindowsIso.ps1"
+#!/bin/sh
+powershell -ExecutionPolicy Bypass -File scripts/update-git-hash-local.ps1
 
-$lines = Get-Content $targetFile
-$found = $false
-$newLines = $lines | ForEach-Object {
-    if (-not $found -and $_ -match '^\$GitHash\s*=\s*".*"$') {
-        $found = $true
-        '$GitHash = "' + $commitHash + '"'
-    } else {
-        $_
+#>
+
+# Get commit hash (short form)
+$commitHash = git rev-parse --short HEAD
+
+# Get files changed in the latest commit (ignore deleted files)
+$changedFiles = git diff-tree --no-commit-id --name-only -r HEAD | Where-Object {
+    Test-Path $_
+}
+
+$commitAmended = $false
+
+foreach ($file in $changedFiles) {
+    $lines = Get-Content $file
+    $lineFound = $false
+    $newLines = $lines | ForEach-Object {
+        # Match only lines at the beginning: $GitHash = "<something>"
+        if (-not $lineFound -and $_ -match '^\$GitHash\s*=\s*".*"$') {
+            $lineFound = $true
+            '$GitHash = "' + $commitHash + '"'
+        } else {
+            $_
+        }
+    }
+    if ($lineFound) {
+        Set-Content -Path $file -Value $newLines
+        git add $file
+        $commitAmended = $true
     }
 }
 
-if ($found) {
-    Set-Content -Path $targetFile -Value $newLines
+if ($commitAmended) {
+    git commit --amend --no-edit
 }
