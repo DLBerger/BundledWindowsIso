@@ -427,9 +427,9 @@ function Stop-TrackedChildren {
 }
 
 function Invoke-DismRead {
-  param([Parameter(Mandatory=$true)][string[]]$Args)
+  param([Parameter(Mandatory=$true)][string[]]$DismArgs)
   Assert-NotCancelled
-  $out = & $script:State.DismPath @Args
+  $out = & $script:State.DismPath @DismArgs
   return ,$out
 }
 
@@ -708,10 +708,10 @@ function Copy-IsoContents([string]$SrcDrive, [string]$DstFolder, [string]$IsoPat
   Write-Host ("  Destination: {0}" -f $dstDisplay) -ForegroundColor Cyan
   Write-Host ("  Log:         {0}" -f $logPath) -ForegroundColor Cyan
 
-  $args = @($srcDisplay, $dstDisplay, "*.*") + $Config.RobocopyArgsBase
-  if ($VerbosePreference -ne 'Continue') { $args += $Config.RobocopyArgsQuiet }
+  $RobocopyArgs = @($srcDisplay, $dstDisplay, "*.*") + $Config.RobocopyArgsBase
+  if ($VerbosePreference -ne 'Continue') { $RobocopyArgs += $Config.RobocopyArgsQuiet }
 
-  if ($VerbosePreference -ne 'Continue') { robocopy @args *> $logPath } else { robocopy @args }
+  if ($VerbosePreference -ne 'Continue') { robocopy @RobocopyArgs *> $logPath } else { robocopy @RobocopyArgs }
   $rc = [int]$LASTEXITCODE
   if ($rc -ge 8) { Fail "Robocopy failed with exit code $rc. See log: $logPath" }
 }
@@ -1336,15 +1336,15 @@ function Add-PackagesByFileListToMountedImage {
 
   if (-not $PackageFiles -or $PackageFiles.Count -lt 1) { return }
 
-  $args = @(
+  $DismArgs = @(
     "/Image:$MountDir",
     "/Add-Package",
     "/ScratchDir:$ScratchRoot",
     "/LogPath:$LogPath"
   )
-  foreach ($f in $PackageFiles) { $args += "/PackagePath:$f" }
+  foreach ($f in $PackageFiles) { $DismArgs += "/PackagePath:$f" }
 
-  $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList $args -StepName $StepLabel
+  $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList $DismArgs -StepName $StepLabel
   if ($rc -ne 0) { Fail "DISM Add-Package failed (exit $rc). See log: $LogPath" }
 }
 
@@ -1630,10 +1630,10 @@ function Build-Iso([string]$IsoRoot, [string]$OutputIso) {
   if (-not (Test-Path $efis)) { Fail "Missing UEFI boot file: $efis" }
 
   $bootdata = "2#p0,e,b$etfs#pEF,e,b$efis"
-  $args = @() + $Config.OscdimgFsArgs + @("-l$($Config.IsoVolumeLabel)", "-bootdata:$bootdata", $IsoRoot, $OutputIso)
+  $OscdimgArgs = @() + $Config.OscdimgFsArgs + @("-l$($Config.IsoVolumeLabel)", "-bootdata:$bootdata", $IsoRoot, $OutputIso)
 
   Write-Host "Building ISO: $OutputIso" -ForegroundColor Green
-  $rc = Invoke-External -FilePath $script:State.OscdimgPath -ArgumentList $args -StepName "OSCDIMG Build ISO"
+  $rc = Invoke-External -FilePath $script:State.OscdimgPath -ArgumentList $OscdimgArgs -StepName "OSCDIMG Build ISO"
   if ($rc -ne 0) { Fail "oscdimg failed with exit code $rc" }
 }
 
