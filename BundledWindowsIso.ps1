@@ -386,6 +386,7 @@ function Register-CancelHandler {
     $e.Cancel = $true
     try { Write-Host "`nCTRL+C detected. Stopping DISM operations and cleaning up..." -ForegroundColor Yellow } catch {}
     try { Clear-Hardened -Aggressive -FromCancel } catch {}
+    [Environment]::Exit(1)
   }
 
   try {
@@ -977,6 +978,7 @@ function Build-InstallWimFromSelection {
 
   $destIndex = 0
   foreach ($srcIndex in $SelectedSourceIndices) {
+    Assert-NotCancelled
     $destIndex++
     $srcName = $nameMap[[int]$srcIndex]
     if (-not $srcName) { $srcName = "<unknown>" }
@@ -1316,6 +1318,7 @@ function Initialize-AllMSUsPresent {
   Write-Host "Downloading updates to ISO folder..." -ForegroundColor Cyan
   foreach ($cat in $selected.Keys) {
     foreach ($entry in $selected[$cat]) {
+      Assert-NotCancelled
       $t = $entry.Title
       Write-Host ("Downloading ({0}): {1}" -f $cat, $t) -ForegroundColor Cyan
       try {
@@ -1462,12 +1465,14 @@ function Add-CuPackagesOrdered {
   $failed    = @()
 
   foreach ($kb in ($KbFolders.Keys | Sort-Object)) {
+    Assert-NotCancelled
     $kbFolder = $KbFolders[$kb]
     $pkgFiles = @()
     $pkgFiles += @(Get-ChildItem -LiteralPath $kbFolder -Filter "*.msu" -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -ExpandProperty FullName)
     $pkgFiles += @(Get-ChildItem -LiteralPath $kbFolder -Filter "*.cab" -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -ExpandProperty FullName)
 
     foreach ($pkg in $pkgFiles) {
+      Assert-NotCancelled
       $leaf   = Split-Path $pkg -Leaf
       $pkgLog = $LogBasePath.Replace(".log", ("_KB{0}_{1}.log" -f $kb, (Protect-Token $leaf)))
       $label  = ("Add-Package {0} KB{1}: {2}" -f $ContextLabel, $kb, $leaf)
@@ -1650,6 +1655,7 @@ function Update-BootWim {
   $idxs = @($pairs | Select-Object -ExpandProperty Index)
 
   foreach ($idx in $idxs) {
+    Assert-NotCancelled
     $nm = ($pairs | Where-Object { $_.Index -eq $idx } | Select-Object -First 1).Name
     if (-not $nm) { $nm = "<unknown>" }
     $nameTag = Protect-Token $nm
@@ -1729,6 +1735,7 @@ function Clear-Hardened {
 
   if ($Aggressive) {
     try { Stop-DismProcessesForWorkRoot -WorkRoot $script:State.WorkRoot } catch {}
+    try { Stop-Process -Name "dism" -Force -ErrorAction SilentlyContinue } catch {}  # catch any stray DISM processes not tracked by WorkRoot
   }
 
   try {
