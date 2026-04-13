@@ -1281,17 +1281,21 @@ function Initialize-AllMSUsPresent {
   $lcuLatest = ($lcuAll | Sort-Object LastUpdated -Descending | Select-Object -First 1)
   $lcuYM = (Get-YYYYMMFromTitle $lcuLatest.Title)
 
-  # Build structured entry objects from a list of raw catalog items
-  $makeLcuEntries = { param($items) @($items | ForEach-Object {
-    [pscustomobject]@{ Category='LCU'; Title=$_.Title; KB=(Get-KBFromTitle $_.Title); YM=(Get-YYYYMMFromTitle $_.Title); Item=$_ }
-  }) }
-
   if ($lcuAll.Count -gt 1) {
+    # Multiple LCU entries detected: download the full checkpoint chain oldest-to-newest
     Write-Host ("Found {0} LCU entries for build {1}; downloading full checkpoint chain." -f $lcuAll.Count, $OsBuild) -ForegroundColor Cyan
-    $selected['LCU'] = & $makeLcuEntries ($lcuAll | Sort-Object LastUpdated)
+    $selected['LCU'] = @($lcuAll | Sort-Object LastUpdated | ForEach-Object {
+      [pscustomobject]@{ Category='LCU'; Title=$_.Title; KB=(Get-KBFromTitle $_.Title); YM=(Get-YYYYMMFromTitle $_.Title); Item=$_ }
+    })
   } else {
-    $selected['LCU'] = & $makeLcuEntries $lcuAll
+    # Single LCU entry: no checkpoint chain required
+    $selected['LCU'] = @($lcuAll | ForEach-Object {
+      [pscustomobject]@{ Category='LCU'; Title=$_.Title; KB=(Get-KBFromTitle $_.Title); YM=(Get-YYYYMMFromTitle $_.Title); Item=$_ }
+    })
   }
+
+  # Non-LCU categories always use the single latest applicable package.
+  # LCU may include multiple entries (checkpoint chain); others are always a single entry.
 
   foreach ($cat in @('SetupDU','SafeOS','SSU','DotNet')) {
     $pick = Select-LatestByCategoryPreferMonth -Results $results -Category $cat -PreferYYYYMM $lcuYM
