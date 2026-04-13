@@ -294,7 +294,6 @@ $script:CancelHandlerRegistered = $false
 # ==============================
 # Helpers
 # ==============================
-function Write-Log([string]$Message) { Write-Verbose ("[{0}] {1}" -f (Get-Date -Format "s"), $Message) }
 
 function Protect-Token([string]$s) {
   if (-not $s) { return "unknown" }
@@ -344,7 +343,7 @@ function Invoke-Step([string]$What, [scriptblock]$Action) {
     Write-Host ("[DryRun] {0}" -f $What) -ForegroundColor Yellow
     return $null
   }
-  Write-Log $What
+  Write-Verbose $What
   return & $Action
 }
 
@@ -548,7 +547,7 @@ function Clear-PreflightDismMounts {
       try { Dismount-WimMountDir -MountDir $md } catch {}
     }
   } else {
-    Write-Log "Preflight: no related mounts to unmount."
+    Write-Verbose "Preflight: no related mounts to unmount."
   }
 
   Clear-DismMountPoints
@@ -636,8 +635,8 @@ function Resolve-Tools {
     }
   }
 
-  Write-Log ("Using DISM: {0} ({1})" -f $script:State.DismPath, $script:State.DismLabel)
-  Write-Log ("Using OSCDIMG: {0} ({1})" -f $script:State.OscdimgPath, $script:State.OscdimgLabel)
+  Write-Verbose ("Using DISM: {0} ({1})" -f $script:State.DismPath, $script:State.DismLabel)
+  Write-Verbose ("Using OSCDIMG: {0} ({1})" -f $script:State.OscdimgPath, $script:State.OscdimgLabel)
 }
 
 # ==============================
@@ -699,12 +698,12 @@ function Get-InputIso([string]$FolderPath) {
 function Mount-Iso([string]$IsoPath) {
   if (Test-AfterPrepDryRun) { return @{ Drive=$null } }
   
-  Write-Log "Mounting ISO: $IsoPath"
+  Write-Verbose "Mounting ISO: $IsoPath"
   $img = Mount-DiskImage -ImagePath $IsoPath -PassThru
   $vol = $img | Get-Volume -ErrorAction SilentlyContinue
   
   if (-not $vol -or -not $vol.DriveLetter) {
-    Write-Log "First mount attempt did not resolve drive letter; retrying..."
+    Write-Verbose "First mount attempt did not resolve drive letter; retrying..."
     Dismount-DiskImage -ImagePath $IsoPath -ErrorAction SilentlyContinue | Out-Null
     Start-Sleep -Milliseconds 500
     $img = Mount-DiskImage -ImagePath $IsoPath -PassThru
@@ -716,7 +715,7 @@ function Mount-Iso([string]$IsoPath) {
   }
   
   $script:State.IsoWasMounted = $true
-  Write-Log "ISO mounted at drive: $($vol.DriveLetter):"
+  Write-Verbose "ISO mounted at drive: $($vol.DriveLetter):"
   return @{ Drive="$($vol.DriveLetter):" }
 }
 
@@ -1258,7 +1257,7 @@ function Initialize-AllMSUsPresent {
   $needDownload = $ForceDownload -or ($existing.Count -lt 1)
 
   if (-not $needDownload) {
-    Write-Log ("Updates already present in ISO folder ({0}); skipping download. Use -UpdateMSUs or -CleanMSUs to refresh." -f $existing.Count)
+    Write-Verbose ("Updates already present in ISO folder ({0}); skipping download. Use -UpdateMSUs or -CleanMSUs to refresh." -f $existing.Count)
     return [pscustomobject]@{ Selected=[ordered]@{}; Downloaded=@() }
   }
 
@@ -1359,7 +1358,7 @@ function Initialize-DUFolders {
   }
 
   # Clean and recreate DU root (removes stale KB folders)
-  Write-Log "Cleaning DU root structure: $DuRoot"
+  Write-Verbose "Cleaning DU root structure: $DuRoot"
   if (Test-Path $DuRoot) {
     try { Remove-Item -Path $DuRoot -Recurse -Force -ErrorAction SilentlyContinue } catch {}
   }
@@ -1367,7 +1366,7 @@ function Initialize-DUFolders {
 
   # Extract KB numbers from each MSU/CAB file and organize into KB-named folders
   # Filter by detected architecture
-  Write-Log "Organizing MSU/CAB files by KB number into: $DuRoot (filtering for $($script:State.DetectedArch))"
+  Write-Verbose "Organizing MSU/CAB files by KB number into: $DuRoot (filtering for $($script:State.DetectedArch))"
   $kbMap = @{}
   foreach ($f in $allPaths) {
     $kb = Get-KbNumberFromPath -p $f
@@ -1379,7 +1378,7 @@ function Initialize-DUFolders {
     # Filter by detected architecture
     $fileArch = Get-ArchFromPath -p $f
     if ($fileArch -and $fileArch -ne $script:State.DetectedArch) {
-      Write-Log ("Skipping {0} (arch {1} does not match detected {2})" -f (Split-Path -Leaf $f), $fileArch, $script:State.DetectedArch)
+      Write-Verbose ("Skipping {0} (arch {1} does not match detected {2})" -f (Split-Path -Leaf $f), $fileArch, $script:State.DetectedArch)
       continue
     }
     
@@ -1399,19 +1398,19 @@ function Initialize-DUFolders {
     Stop-Script "No valid MSU/CAB files found after filtering. Check architecture match."
   }
 
-  Write-Log "KB map contains: $($kbMap.Count) entries"
-  Write-Log "KB numbers: $($kbMap.Keys -join ', ')"
+  Write-Verbose "KB map contains: $($kbMap.Count) entries"
+  Write-Verbose "KB numbers: $($kbMap.Keys -join ', ')"
   
   # Create KB-numbered folders and copy files
-  Write-Log "Creating KB-numbered folders under DU root"
+  Write-Verbose "Creating KB-numbered folders under DU root"
   $kbFolders = [ordered]@{}
   $sortedKbs = @($kbMap.Keys | Sort-Object { [int]$_ })
-  Write-Log "Sorted KB numbers: $($sortedKbs -join ', ')"
+  Write-Verbose "Sorted KB numbers: $($sortedKbs -join ', ')"
   
   foreach ($kb in $sortedKbs) {
     $kb = [int]$kb  # Ensure $kb is an integer, not string
     $kbKey = "KB$kb"  # Use string key to avoid hashtable index limits
-    Write-Log "Processing $kbKey"
+    Write-Verbose "Processing $kbKey"
     $kbFolder = Join-Path $DuRoot $kbKey
     New-Folder $kbFolder
     
@@ -1420,7 +1419,7 @@ function Initialize-DUFolders {
     foreach ($f in $kbMap[$kb]) {
       $fname = Split-Path -Leaf $f
       Copy-Item -Path $f -Destination (Join-Path $kbFolder $fname) -Force
-      Write-Log ("  Copied {0} -> {1}" -f $fname, $kbKey)
+      Write-Verbose ("  Copied {0} -> {1}" -f $fname, $kbKey)
     }
   }
 
@@ -1470,17 +1469,17 @@ function Add-PackagesFromKBFolder {
   $packages += @(Get-ChildItem -LiteralPath $KbFolder -Filter "*.cab" -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -ExpandProperty FullName)
 
   if ($packages.Count -lt 1) {
-    Write-Log ("No packages found in KB{0}; skipping." -f $KbNumber)
+    Write-Verbose ("No packages found in KB{0}; skipping." -f $KbNumber)
     return
   }
 
-  Write-Log ("Installing {0} package(s) from KB{1} to {2}" -f $packages.Count, $KbNumber, $ContextLabel)
+  Write-Verbose ("Installing {0} package(s) from KB{1} to {2}" -f $packages.Count, $KbNumber, $ContextLabel)
 
   foreach ($pkg in $packages) {
     $leaf = Split-Path $pkg -Leaf
     $pkgLog = $LogBasePath.Replace(".log", ("_KB{0}_{1}.log" -f $KbNumber, (Protect-Token $leaf)))
 
-    Write-Log ("Adding package: {0}" -f $leaf)
+    Write-Verbose ("Adding package: {0}" -f $leaf)
     $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
       "/Image:$MountDir",
       "/Add-Package",
@@ -1544,7 +1543,7 @@ function Update-WinREInsideMountedOS {
 
   $winrePath = Join-Path $OsMountDir 'Windows\System32\Recovery\winre.wim'
   if (-not (Test-Path $winrePath)) {
-    Write-Log ("WinRE not found for OS: {0} (index {1}); skipping WinRE servicing." -f $OsName, $OsIndex)
+    Write-Verbose ("WinRE not found for OS: {0} (index {1}); skipping WinRE servicing." -f $OsName, $OsIndex)
     return
   }
 
@@ -1555,13 +1554,13 @@ function Update-WinREInsideMountedOS {
   New-Folder $tmp
   New-Folder $mDir
 
-  Write-Log ("Copy winre.wim for OS: {0} (index {1})" -f $OsName, $OsIndex)
+  Write-Verbose ("Copy winre.wim for OS: {0} (index {1})" -f $OsName, $OsIndex)
   Invoke-Step ("Copy winre.wim for OS: $OsName (index $OsIndex)") { Copy-Item -Path $winrePath -Destination $tmpWim -Force } | Out-Null
 
   Assert-ImageNotMounted -ImageFile $tmpWim -Index 1
 
   $mountLog = Join-Path $LogsRoot ("dism_mount_winre_{0}_idx{1}.log" -f $nameTag, $OsIndex)
-  Write-Log ("Mount WinRE for {0} (index {1})" -f $OsName, $OsIndex)
+  Write-Verbose ("Mount WinRE for {0} (index {1})" -f $OsName, $OsIndex)
   $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
     "/Mount-Image",
     "/ImageFile:$tmpWim",
@@ -1582,7 +1581,7 @@ function Update-WinREInsideMountedOS {
     Add-CuPackagesOrdered -MountDir $mDir -KbFolders $KbFolders -ScratchRoot $ScratchRoot -LogBasePath $cuBase -ContextLabel ("WinRE {0}" -f $OsName)
   }
   finally {
-    Write-Log ("Unmount and commit WinRE for {0} (index {1})" -f $OsName, $OsIndex)
+    Write-Verbose ("Unmount and commit WinRE for {0} (index {1})" -f $OsName, $OsIndex)
     $rc2 = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
       "/Unmount-Image",
       "/MountDir:$mDir",
@@ -1623,7 +1622,7 @@ function Update-InstallWimIndex {
 
   Assert-ImageNotMounted -ImageFile $WimPath -Index $Index
 
-  Write-Log ("Mount OS image: {0} (index {1})" -f $IndexName, $Index)
+  Write-Verbose ("Mount OS image: {0} (index {1})" -f $IndexName, $Index)
   $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
     "/Mount-Image",
     "/ImageFile:$WimPath",
@@ -1647,7 +1646,7 @@ function Update-InstallWimIndex {
     Update-WinREInsideMountedOS -OsMountDir $mountDir -OsName $IndexName -OsIndex $Index -KbFolders $KbFolders -ScratchRoot $ScratchRoot -LogsRoot $LogsRoot
   }
   finally {
-    Write-Log ("Unmount and commit OS image: {0} (index {1})" -f $IndexName, $Index)
+    Write-Verbose ("Unmount and commit OS image: {0} (index {1})" -f $IndexName, $Index)
     $rc2 = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
       "/Unmount-Image",
       "/MountDir:$mountDir",
@@ -1688,7 +1687,7 @@ function Update-BootWim {
 
     Assert-ImageNotMounted -ImageFile $BootWimPath -Index $idx
 
-    Write-Log ("Mount boot.wim: {0} (index {1})" -f $nm, $idx)
+    Write-Verbose ("Mount boot.wim: {0} (index {1})" -f $nm, $idx)
     $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
       "/Mount-Image",
       "/ImageFile:$BootWimPath",
@@ -1709,7 +1708,7 @@ function Update-BootWim {
       Add-CuPackagesOrdered -MountDir $mountDir -KbFolders $KbFolders -ScratchRoot $ScratchRoot -LogBasePath $cuBase -ContextLabel ("boot.wim {0}" -f $nm)
     }
     finally {
-      Write-Log ("Unmount and commit boot.wim: {0} (index {1})" -f $nm, $idx)
+      Write-Verbose ("Unmount and commit boot.wim: {0} (index {1})" -f $nm, $idx)
       $rc2 = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
         "/Unmount-Image",
         "/MountDir:$mountDir",
@@ -1974,8 +1973,8 @@ try {
   $maxIndex = ($pairs | Measure-Object -Property Index -Maximum).Maximum
   $nameMap = Get-IndexNameMap -Pairs $pairs
 
-  Write-Log ("install.wim stash: {0}" -f $script:State.StashedInstallWim)
-  Write-Log ("Found {0} WIM indices; max index = {1}" -f $pairs.Count, $maxIndex)
+  Write-Verbose ("install.wim stash: {0}" -f $script:State.StashedInstallWim)
+  Write-Verbose ("Found {0} WIM indices; max index = {1}" -f $pairs.Count, $maxIndex)
   if ($VerbosePreference -eq 'Continue') {
     Write-Host "Available indices (index : name):" -ForegroundColor Cyan
     foreach ($p in $pairs) { Write-Host ("  {0}: {1}" -f $p.Index, $p.Name) -ForegroundColor Cyan }
@@ -2080,7 +2079,7 @@ try {
     Clear-PreflightDismMounts -RelevantImageFiles $relevant -RelevantMountRoot $script:State.MountRoot
 
     # Service install.wim indices: mount each index, apply all KB packages in numeric order
-    Write-Log "Starting install.wim servicing"
+    Write-Verbose "Starting install.wim servicing"
     $rebuiltPairs = Get-WimPairs -InstallPath $wimToService
     $rebuiltNameMap = Get-IndexNameMap -Pairs $rebuiltPairs
     $serviceIndexes = @($rebuiltPairs | Select-Object -ExpandProperty Index)
@@ -2094,7 +2093,7 @@ try {
 
     # Service boot.wim (WinPE/Setup) with all KB packages in numeric order
     if (Test-Path $bootWim) {
-      Write-Log "Starting boot.wim servicing"
+      Write-Verbose "Starting boot.wim servicing"
       Write-Host "Servicing boot.wim (WinPE)..." -ForegroundColor Cyan
       Update-BootWim -BootWimPath $bootWim -KbFolders $kbFolders -MountRoot $script:State.MountRoot -LogsRoot $script:State.LogsRoot -ScratchRoot $script:State.ScratchRoot
     } else {
