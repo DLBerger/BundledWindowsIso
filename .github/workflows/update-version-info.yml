@@ -20,7 +20,7 @@ jobs:
 
       - name: Run version update script
         shell: pwsh
-        run: ./scripts/update-git-hash.ps1      # Adjust the path if needed
+        run: ./scripts/update-git-hash-github.ps1  # Adjust the path if needed
 
       - name: Commit and push changes
         uses: stefanzweifel/git-auto-commit-action@v5
