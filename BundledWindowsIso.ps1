@@ -159,7 +159,7 @@ $script:Name = "BundledWindowsIso.ps1"
 # ==============================
 # git information
 # ==============================
-$GitHash = "d494386"
+$GitHash = "20d41aa"
 
 # ==============================
 # Script identity
