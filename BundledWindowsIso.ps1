@@ -1521,11 +1521,22 @@ function Add-CuPackagesOrdered {
     return
   }
 
-  # Walk KB folders in numeric order
+  # Gather all package files from KB folders in numeric KB order
   Write-Host ("Applying CU packages for {0} in KB order (total {1} KBs)..." -f $ContextLabel, $KbFolders.Count) -ForegroundColor Cyan
+  $allPackageFiles = @()
   foreach ($kb in ($KbFolders.Keys | Sort-Object)) {
-    Add-PackagesFromKBFolder -MountDir $MountDir -KbFolder $KbFolders[$kb] -KbNumber $kb -ScratchRoot $ScratchRoot -LogBasePath $LogBasePath -ContextLabel $ContextLabel
+    $kbFolder = $KbFolders[$kb]
+    $allPackageFiles += @(Get-ChildItem -LiteralPath $kbFolder -Filter "*.msu" -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -ExpandProperty FullName)
+    $allPackageFiles += @(Get-ChildItem -LiteralPath $kbFolder -Filter "*.cab" -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -ExpandProperty FullName)
   }
+
+  if ($allPackageFiles.Count -lt 1) {
+    Write-Host ("No packages found for {0}; skipping." -f $ContextLabel) -ForegroundColor Yellow
+    return
+  }
+
+  # Apply all packages in a single DISM invocation
+  Add-PackagesByFileListToMountedImage -MountDir $MountDir -PackageFiles $allPackageFiles -ScratchRoot $ScratchRoot -LogPath $LogBasePath -StepLabel ("Add-Package {0}" -f $ContextLabel)
 }
 
 # ==============================
