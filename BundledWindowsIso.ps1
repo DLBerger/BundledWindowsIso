@@ -294,9 +294,9 @@ $script:CancelHandlerRegistered = $false
 # ==============================
 # Helpers
 # ==============================
-function V([string]$Message) { Write-Verbose ("[{0}] {1}" -f (Get-Date -Format "s"), $Message) }
+function Write-Log([string]$Message) { Write-Verbose ("[{0}] {1}" -f (Get-Date -Format "s"), $Message) }
 
-function Sanitize-Token([string]$s) {
+function Protect-Token([string]$s) {
   if (-not $s) { return "unknown" }
   $t = $s -replace '[^\w\.-]+','_'
   $t = $t -replace '_+','_'
@@ -318,7 +318,7 @@ function Show-Usage {
   Write-Host ""
 }
 
-function Fail([string]$Message, [int]$Code = 1) {
+function Stop-Script([string]$Message, [int]$Code = 1) {
   Write-Host ""
   Write-Host "ERROR: $Message" -ForegroundColor Red
   Show-Usage
@@ -329,7 +329,7 @@ function Assert-Admin {
   $id = [Security.Principal.WindowsIdentity]::GetCurrent()
   $p  = New-Object Security.Principal.WindowsPrincipal($id)
   if (-not $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Fail "Please run PowerShell as Administrator."
+    Stop-Script "Please run PowerShell as Administrator."
   }
 }
 
@@ -337,18 +337,18 @@ function Assert-NotCancelled {
   if ($script:Cancelled) { throw [System.OperationCanceledException]::new("Cancelled by user (Ctrl+C).") }
 }
 
-function In-AfterPrepDryRun { return ($script:DryRun -and $script:DryRunPhase -eq 'afterprep') }
+function Test-AfterPrepDryRun { return ($script:DryRun -and $script:DryRunPhase -eq 'afterprep') }
 
 function Invoke-Step([string]$What, [scriptblock]$Action) {
-  if (In-AfterPrepDryRun) {
+  if (Test-AfterPrepDryRun) {
     Write-Host ("[DryRun] {0}" -f $What) -ForegroundColor Yellow
     return $null
   }
-  V $What
+  Write-Log $What
   return & $Action
 }
 
-function Ensure-Folder([string]$Path) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+function New-Folder([string]$Path) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
 
 function Show-RunBanner {
   Write-Host ""
@@ -387,7 +387,7 @@ function Register-CancelHandler {
     $script:Cancelled = $true
     $e.Cancel = $true
     try { Write-Host "`nCTRL+C detected. Stopping DISM operations and cleaning up..." -ForegroundColor Yellow } catch {}
-    try { Cleanup-Hardened -Aggressive -FromCancel } catch {}
+    try { Clear-Hardened -Aggressive -FromCancel } catch {}
   }
 
   try {
@@ -411,7 +411,7 @@ function Invoke-External {
 
   Assert-NotCancelled
 
-  if (In-AfterPrepDryRun) {
+  if (Test-AfterPrepDryRun) {
     Write-Host ("[DryRun] EXEC: {0} {1}" -f $FilePath, ($ArgumentList -join ' ')) -ForegroundColor Yellow
     return 0
   }
@@ -459,7 +459,7 @@ function Get-MountedWimInfoText {
   try { return ,(& $script:State.DismPath "/Get-MountedWimInfo") } catch { return @() }
 }
 
-function Parse-MountedWimInfo {
+function ConvertFrom-MountedWimInfo {
   param([string[]]$Lines)
 
   $entries = @()
@@ -480,7 +480,7 @@ function Parse-MountedWimInfo {
   return $entries
 }
 
-function Unmount-WimMountDir {
+function Dismount-WimMountDir {
   param([Parameter(Mandatory=$true)][string]$MountDir)
 
   if (-not (Test-Path $MountDir)) { return }
@@ -496,7 +496,7 @@ function Unmount-WimMountDir {
   }
 }
 
-function Cleanup-DismMountPoints {
+function Clear-DismMountPoints {
   Write-Host "Running DISM cleanup for mount points..." -ForegroundColor Yellow
   try {
     $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList @("/Cleanup-MountPoints") -StepName "DISM Cleanup-MountPoints"
@@ -512,7 +512,7 @@ function Cleanup-DismMountPoints {
   } catch {}
 }
 
-function Preflight-CleanupDismMounts {
+function Clear-PreflightDismMounts {
   param(
     [string[]]$RelevantImageFiles = @(),
     [string]$RelevantMountRoot = $null
@@ -521,7 +521,7 @@ function Preflight-CleanupDismMounts {
   if (-not $Config.PreflightCleanupMountPoints) { return }
 
   Write-Host "Preflight: checking for existing DISM mounted images..." -ForegroundColor Yellow
-  $entries = Parse-MountedWimInfo -Lines (Get-MountedWimInfoText)
+  $entries = ConvertFrom-MountedWimInfo -Lines (Get-MountedWimInfoText)
 
   $toUnmount = @()
   foreach ($e in $entries) {
@@ -545,32 +545,32 @@ function Preflight-CleanupDismMounts {
   if ($toUnmount.Count -gt 0 -and $Config.PreflightUnmountMatchingMountedImages) {
     Write-Host ("Preflight: unmounting {0} mounted image(s) related to this run..." -f $toUnmount.Count) -ForegroundColor Yellow
     foreach ($md in $toUnmount) {
-      try { Unmount-WimMountDir -MountDir $md } catch {}
+      try { Dismount-WimMountDir -MountDir $md } catch {}
     }
   } else {
-    V "Preflight: no related mounts to unmount."
+    Write-Log "Preflight: no related mounts to unmount."
   }
 
-  Cleanup-DismMountPoints
+  Clear-DismMountPoints
 }
 
-function Ensure-ImageNotMounted {
+function Assert-ImageNotMounted {
   param(
     [Parameter(Mandatory=$true)][string]$ImageFile,
     [Parameter(Mandatory=$true)][int]$Index
   )
 
-  $entries = Parse-MountedWimInfo -Lines (Get-MountedWimInfoText)
+  $entries = ConvertFrom-MountedWimInfo -Lines (Get-MountedWimInfoText)
   foreach ($e in $entries) {
     if (-not $e.ImageFile -or -not $e.ImageIndex -or -not $e.MountDir) { continue }
     if ($e.ImageFile.Trim('"') -ieq $ImageFile.Trim('"') -and [int]$e.ImageIndex -eq [int]$Index) {
       Write-Host ("Detected existing mount for {0} (Index {1}) at {2}. Discarding..." -f $ImageFile, $Index, $e.MountDir) -ForegroundColor Yellow
-      Unmount-WimMountDir -MountDir $e.MountDir
+      Dismount-WimMountDir -MountDir $e.MountDir
     }
   }
 }
 
-function Kill-DismProcessesForWorkRoot {
+function Stop-DismProcessesForWorkRoot {
   param([string]$WorkRoot)
 
   if (-not $WorkRoot) { return }
@@ -611,33 +611,33 @@ function Resolve-Tools {
     [switch]$UseSystem
   )
 
-  if ($UseADK -and $UseSystem) { Fail "Use only one of -UseADK or -UseSystem." }
+  if ($UseADK -and $UseSystem) { Stop-Script "Use only one of -UseADK or -UseSystem." }
 
   if ($ExplicitDism) {
-    if (-not (Test-Path $ExplicitDism)) { Fail "Specified -dism path not found: $ExplicitDism" }
+    if (-not (Test-Path $ExplicitDism)) { Stop-Script "Specified -dism path not found: $ExplicitDism" }
     $script:State.DismPath = $ExplicitDism; $script:State.DismLabel = "Explicit"
   } else {
     $adk = if (-not $UseSystem) { Find-AdkToolPath dism } else { $null }
     if ($adk) { $script:State.DismPath = $adk; $script:State.DismLabel = "ADK" }
     else { $script:State.DismPath = "$env:windir\System32\dism.exe"; $script:State.DismLabel = "System" }
-    if (-not (Test-Path $script:State.DismPath)) { Fail "DISM not found." }
+    if (-not (Test-Path $script:State.DismPath)) { Stop-Script "DISM not found." }
   }
 
   if ($ExplicitOscdimg) {
-    if (-not (Test-Path $ExplicitOscdimg)) { Fail "Specified -oscdimg path not found: $ExplicitOscdimg" }
+    if (-not (Test-Path $ExplicitOscdimg)) { Stop-Script "Specified -oscdimg path not found: $ExplicitOscdimg" }
     $script:State.OscdimgPath = $ExplicitOscdimg; $script:State.OscdimgLabel = "Explicit"
   } else {
     $adk = if (-not $UseSystem) { Find-AdkToolPath oscdimg } else { $null }
     if ($adk) { $script:State.OscdimgPath = $adk; $script:State.OscdimgLabel = "ADK" }
     else {
       $cmd = Get-Command oscdimg.exe -ErrorAction SilentlyContinue
-      if (-not $cmd) { Fail "oscdimg.exe not found (install ADK or add to PATH)." }
+      if (-not $cmd) { Stop-Script "oscdimg.exe not found (install ADK or add to PATH)." }
       $script:State.OscdimgPath = $cmd.Source; $script:State.OscdimgLabel = "PATH"
     }
   }
 
-  V ("Using DISM: {0} ({1})" -f $script:State.DismPath, $script:State.DismLabel)
-  V ("Using OSCDIMG: {0} ({1})" -f $script:State.OscdimgPath, $script:State.OscdimgLabel)
+  Write-Log ("Using DISM: {0} ({1})" -f $script:State.DismPath, $script:State.DismLabel)
+  Write-Log ("Using OSCDIMG: {0} ({1})" -f $script:State.OscdimgPath, $script:State.OscdimgLabel)
 }
 
 # ==============================
@@ -674,7 +674,7 @@ function Write-Meta {
     "StashedInstallWim=$($script:State.StashedInstallWim)",
     "OutputIsoPath=$($script:State.OutputIsoPath)"
   )
-  if (In-AfterPrepDryRun) { Write-Host "[DryRun] Would write meta file." -ForegroundColor Yellow; return }
+  if (Test-AfterPrepDryRun) { Write-Host "[DryRun] Would write meta file." -ForegroundColor Yellow; return }
   Set-Content -Path $script:State.MetaPath -Value $lines -Encoding ASCII
 }
 
@@ -692,19 +692,19 @@ function Read-Meta([string]$MetaPath) {
 # ==============================
 function Get-InputIso([string]$FolderPath) {
   $isos = Get-ChildItem -LiteralPath $FolderPath -Filter "*.iso" -File | Where-Object { $_.Name -notlike "*$($Config.OutputIsoSuffix)" }
-  if ($isos.Count -ne 1) { Fail "Expected exactly 1 input ISO (excluding *$($Config.OutputIsoSuffix)) in '$FolderPath'. Found $($isos.Count)." }
+  if ($isos.Count -ne 1) { Stop-Script "Expected exactly 1 input ISO (excluding *$($Config.OutputIsoSuffix)) in '$FolderPath'. Found $($isos.Count)." }
   return $isos[0].FullName
 }
 
 function Mount-Iso([string]$IsoPath) {
-  if (In-AfterPrepDryRun) { return @{ Drive=$null } }
+  if (Test-AfterPrepDryRun) { return @{ Drive=$null } }
   
-  V "Mounting ISO: $IsoPath"
+  Write-Log "Mounting ISO: $IsoPath"
   $img = Mount-DiskImage -ImagePath $IsoPath -PassThru
   $vol = $img | Get-Volume -ErrorAction SilentlyContinue
   
   if (-not $vol -or -not $vol.DriveLetter) {
-    V "First mount attempt did not resolve drive letter; retrying..."
+    Write-Log "First mount attempt did not resolve drive letter; retrying..."
     Dismount-DiskImage -ImagePath $IsoPath -ErrorAction SilentlyContinue | Out-Null
     Start-Sleep -Milliseconds 500
     $img = Mount-DiskImage -ImagePath $IsoPath -PassThru
@@ -712,16 +712,16 @@ function Mount-Iso([string]$IsoPath) {
   }
   
   if (-not $vol -or -not $vol.DriveLetter) { 
-    Fail "Failed to mount ISO or resolve a drive letter. Check that the ISO is valid and accessible. You may need to manually eject any mounted images in Disk Management." 
+    Stop-Script "Failed to mount ISO or resolve a drive letter. Check that the ISO is valid and accessible. You may need to manually eject any mounted images in Disk Management." 
   }
   
   $script:State.IsoWasMounted = $true
-  V "ISO mounted at drive: $($vol.DriveLetter):"
+  Write-Log "ISO mounted at drive: $($vol.DriveLetter):"
   return @{ Drive="$($vol.DriveLetter):" }
 }
 
 function Copy-IsoContents([string]$SrcDrive, [string]$DstFolder, [string]$IsoPathForDisplay) {
-  if (In-AfterPrepDryRun) { return }
+  if (Test-AfterPrepDryRun) { return }
 
   New-Item -ItemType Directory -Path $DstFolder -Force | Out-Null
   New-Item -ItemType Directory -Path $script:State.LogsRoot -Force | Out-Null
@@ -742,7 +742,7 @@ function Copy-IsoContents([string]$SrcDrive, [string]$DstFolder, [string]$IsoPat
 
   if ($VerbosePreference -ne 'Continue') { robocopy @args *> $logPath } else { robocopy @args }
   $rc = [int]$LASTEXITCODE
-  if ($rc -ge 8) { Fail "Robocopy failed with exit code $rc. See log: $logPath" }
+  if ($rc -ge 8) { Stop-Script "Robocopy failed with exit code $rc. See log: $logPath" }
 }
 
 function Get-InstallImagePathFromRoot([string]$Root) {
@@ -759,7 +759,7 @@ function Get-InstallImagePathFromRoot([string]$Root) {
 # ==============================
 function Get-WimPairs([string]$InstallPath) {
   $out = Invoke-DismRead -Args @("/Get-WimInfo", "/WimFile:$InstallPath")
-  if ($LASTEXITCODE -ne 0) { Fail "DISM /Get-WimInfo failed for $InstallPath" }
+  if ($LASTEXITCODE -ne 0) { Stop-Script "DISM /Get-WimInfo failed for $InstallPath" }
 
   $pairs = @()
   $cur = $null
@@ -770,7 +770,7 @@ function Get-WimPairs([string]$InstallPath) {
       $cur = $null
     }
   }
-  if ($pairs.Count -lt 1) { Fail "No indexes found in $InstallPath" }
+  if ($pairs.Count -lt 1) { Stop-Script "No indexes found in $InstallPath" }
   return $pairs
 }
 
@@ -788,7 +788,7 @@ function Show-Indices([string]$InstallPath) {
 # ==============================
 # Indices selection helpers
 # ==============================
-function Normalize-Label([string]$s) {
+function Format-Label([string]$s) {
   if (-not $s) { return "" }
   $t = $s.Trim()
   $t = $t -replace '^(?i)\s*Windows\s+\d+\s+', ''
@@ -796,16 +796,16 @@ function Normalize-Label([string]$s) {
   return $t.Trim()
 }
 
-function Unquote([string]$s) {
+function Remove-Quotes([string]$s) {
   if ($null -eq $s) { return "" }
   $t = $s.Trim()
   if (($t.StartsWith('"') -and $t.EndsWith('"')) -or ($t.StartsWith("'") -and $t.EndsWith("'"))) { return $t.Substring(1, $t.Length-2) }
   return $t
 }
 
-function Is-RegexLabelToken([string]$tok) { (Unquote $tok).Trim().StartsWith("re:", [System.StringComparison]::OrdinalIgnoreCase) }
-function Is-WildcardLabelToken([string]$tok) {
-  $t = Unquote $tok
+function Test-RegexLabelToken([string]$tok) { (Remove-Quotes $tok).Trim().StartsWith("re:", [System.StringComparison]::OrdinalIgnoreCase) }
+function Test-WildcardLabelToken([string]$tok) {
+  $t = Remove-Quotes $tok
   if ($t.StartsWith("re:", [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
   return ($t.Contains('*') -or $t.Contains('?'))
 }
@@ -813,10 +813,10 @@ function Is-WildcardLabelToken([string]$tok) {
 function Resolve-LabelTokenToIndices {
   param([object[]]$Pairs, [string]$Token)
 
-  $tok = Unquote $Token
-  $items = foreach ($p in $Pairs) { [pscustomobject]@{ Index=[int]$p.Index; Norm=(Normalize-Label $p.Name) } }
+  $tok = Remove-Quotes $Token
+  $items = foreach ($p in $Pairs) { [pscustomobject]@{ Index=[int]$p.Index; Norm=(Format-Label $p.Name) } }
 
-  if (Is-RegexLabelToken $tok) {
+  if (Test-RegexLabelToken $tok) {
     $pat = $tok.Substring(3).Trim()
     if ($pat -eq "") { return @() }
     try {
@@ -825,15 +825,15 @@ function Resolve-LabelTokenToIndices {
     } catch { return @() }
   }
 
-  if (Is-WildcardLabelToken $tok) {
+  if (Test-WildcardLabelToken $tok) {
     return @($items | Where-Object { $_.Norm -like $tok } | Select-Object -ExpandProperty Index)
   }
 
-  $key = (Normalize-Label $tok).ToLowerInvariant()
+  $key = (Format-Label $tok).ToLowerInvariant()
   return @($items | Where-Object { $_.Norm.ToLowerInvariant() -eq $key } | Select-Object -ExpandProperty Index)
 }
 
-function Normalize-IndicesSpec([string]$Spec) {
+function Format-IndicesSpec([string]$Spec) {
   if ($null -eq $Spec) { return "" }
   $s = [string]$Spec
   $s = $s -replace ';', ','
@@ -857,7 +857,7 @@ function Split-SelectorTokens([string]$Spec) {
   return $tokens
 }
 
-function Parse-IndicesSpec {
+function ConvertFrom-IndicesSpec {
   param([string]$Spec, [int]$MaxIndex, [object[]]$Pairs)
 
   $selected = @()
@@ -865,7 +865,7 @@ function Parse-IndicesSpec {
   $badIdx = @()
   $badLabels = @()
 
-  $Spec = Normalize-IndicesSpec $Spec
+  $Spec = Format-IndicesSpec $Spec
   if (-not $Spec) { return @{ Selected=@(); InvalidTokens=@(); InvalidIndices=@(); InvalidLabels=@() } }
 
   foreach ($raw in (Split-SelectorTokens $Spec)) {
@@ -904,7 +904,7 @@ function Parse-IndicesSpec {
 # ==============================
 # ESD -> WIM
 # ==============================
-function Ensure-StashedInstallWim {
+function Initialize-StashedInstallWim {
   param([string]$InstallRoot)
 
   $wim = Join-Path $InstallRoot 'install.wim'
@@ -915,11 +915,11 @@ function Ensure-StashedInstallWim {
   Write-Host "Converting INSTALL\install.esd to INSTALL\install.wim..." -ForegroundColor Cyan
 
   $info = Invoke-DismRead -Args @("/Get-ImageInfo", "/ImageFile:$esd")
-  if ($LASTEXITCODE -ne 0) { Fail "DISM failed to read install.esd." }
+  if ($LASTEXITCODE -ne 0) { Stop-Script "DISM failed to read install.esd." }
 
   $indexes = @()
   foreach ($line in $info) { if ($line -match '^\s*Index\s*:\s*(\d+)\s*$') { $indexes += [int]$Matches[1] } }
-  if ($indexes.Count -lt 1) { Fail "Could not parse indexes from install.esd." }
+  if ($indexes.Count -lt 1) { Stop-Script "Could not parse indexes from install.esd." }
 
   if (Test-Path $wim) { Remove-Item -Path $wim -Force -ErrorAction SilentlyContinue | Out-Null }
 
@@ -933,7 +933,7 @@ function Ensure-StashedInstallWim {
       "/CheckIntegrity"
     ) -StepName ("Export-Image (ESD->WIM) idx {0}" -f $idx)
 
-    if ($rc -ne 0) { Fail "DISM Export-Image failed for SourceIndex $idx (exit $rc)." }
+    if ($rc -ne 0) { Stop-Script "DISM Export-Image failed for SourceIndex $idx (exit $rc)." }
   }
   return $wim
 }
@@ -941,7 +941,7 @@ function Ensure-StashedInstallWim {
 # ==============================
 # Rebuild install.wim (per-index progress + summary)
 # ==============================
-function Rebuild-InstallWimFromSelection {
+function Build-InstallWimFromSelection {
   param(
     [string]$StashedWim,
     [string]$IsoSourcesDir,
@@ -995,7 +995,7 @@ function Rebuild-InstallWimFromSelection {
       "/CheckIntegrity"
     ) -StepName ("Export-Image {0} (src idx {1} -> dst idx {2})" -f $srcName, $srcIndex, $destIndex)
 
-    if ($rc -ne 0) { Fail "DISM Export-Image failed for SourceIndex $srcIndex (exit $rc)." }
+    if ($rc -ne 0) { Stop-Script "DISM Export-Image failed for SourceIndex $srcIndex (exit $rc)." }
 
     Write-Host "  Done." -ForegroundColor Cyan
     Write-Host ""
@@ -1041,7 +1041,7 @@ function Write-SetupLauncherCmds {
 # ==============================
 # Detection (OS, arch, release)
 # ==============================
-function Detect-MediaInfoFromInstallWim {
+function Get-MediaInfoFromInstallWim {
   param([Parameter(Mandatory=$true)][string]$InstallWim)
 
   $pairs = Get-WimPairs -InstallPath $InstallWim
@@ -1121,7 +1121,7 @@ function Detect-MediaInfoFromInstallWim {
 # ==============================
 # MSCatalogLTS download helpers
 # ==============================
-function Ensure-MSCatalogLTS {
+function Initialize-MSCatalogLTS {
   $m = Get-Module -ListAvailable -Name MSCatalogLTS -ErrorAction SilentlyContinue
   if (-not $m) {
     Write-Host "MSCatalogLTS module not found; installing from PowerShell Gallery..." -ForegroundColor Cyan
@@ -1129,17 +1129,17 @@ function Ensure-MSCatalogLTS {
       try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
       Install-Module -Name MSCatalogLTS -Scope CurrentUser -Force -ErrorAction Stop
     } catch {
-      Fail "Failed to install MSCatalogLTS. Install it manually: Install-Module MSCatalogLTS -Scope CurrentUser. Error: $($_.Exception.Message)"
+      Stop-Script "Failed to install MSCatalogLTS. Install it manually: Install-Module MSCatalogLTS -Scope CurrentUser. Error: $($_.Exception.Message)"
     }
   }
   try {
     Import-Module MSCatalogLTS -Force -ErrorAction Stop
   } catch {
-    Fail "Failed to import MSCatalogLTS module. Error: $($_.Exception.Message)"
+    Stop-Script "Failed to import MSCatalogLTS module. Error: $($_.Exception.Message)"
   }
 }
 
-function Title-IsExcluded([string]$Title) {
+function Test-TitleExcluded([string]$Title) {
   if (-not $Title) { return $true }
   $t = $Title.ToLowerInvariant()
   foreach ($tok in $Config.CatalogExcludeTitleTokens) {
@@ -1148,14 +1148,14 @@ function Title-IsExcluded([string]$Title) {
   return $false
 }
 
-function Extract-KBFromTitle([string]$Title) {
+function Get-KBFromTitle([string]$Title) {
   if (-not $Title) { return $null }
   $m = [regex]::Match($Title, '(?i)\bKB(\d{6,8})\b')
   if ($m.Success) { return ("KB{0}" -f $m.Groups[1].Value) }
   return $null
 }
 
-function Parse-YYYYMMFromTitle([string]$Title) {
+function Get-YYYYMMFromTitle([string]$Title) {
   if (-not $Title) { return $null }
   $m = [regex]::Match($Title, '^(?i)(\d{4})-(\d{2})\b')
   if ($m.Success) { return ("{0}-{1}" -f $m.Groups[1].Value, $m.Groups[2].Value) }
@@ -1166,7 +1166,7 @@ function Get-LocalMsuFiles([string]$FolderPath) {
   return @(Get-ChildItem -LiteralPath $FolderPath -Filter "*.msu" -File -ErrorAction SilentlyContinue | Sort-Object Name)
 }
 
-function Clean-MsuFolder([string]$FolderPath) {
+function Clear-MsuFolder([string]$FolderPath) {
   $msus = Get-LocalMsuFiles -FolderPath $FolderPath
   if ($msus.Count -lt 1) { return }
   Write-Host ("[CleanMSUs] Deleting {0} existing MSU(s) in {1}" -f $msus.Count, $FolderPath) -ForegroundColor Yellow
@@ -1210,7 +1210,7 @@ function Get-CatalogCandidatesBroad {
   return $res
 }
 
-function Pick-LatestByCategoryPreferMonth {
+function Select-LatestByCategoryPreferMonth {
   param(
     [Parameter(Mandatory=$true)][object[]]$Results,
     [Parameter(Mandatory=$true)][ValidateSet('LCU','SetupDU','SafeOS','SSU','DotNet')][string]$Category,
@@ -1222,7 +1222,7 @@ function Pick-LatestByCategoryPreferMonth {
   $filtered = @(
     $Results |
       Where-Object { $_.Title } |
-      Where-Object { -not (Title-IsExcluded $_.Title) } |
+      Where-Object { -not (Test-TitleExcluded $_.Title) } |
       Where-Object { $_.Title -match $rx }
   )
 
@@ -1243,7 +1243,7 @@ function Pick-LatestByCategoryPreferMonth {
   return ($filtered | Sort-Object LastUpdated -Descending | Select-Object -First 1)
 }
 
-function Ensure-AllMSUsPresent {
+function Initialize-AllMSUsPresent {
   param(
     [Parameter(Mandatory=$true)][string]$IsoFolder,
     [Parameter(Mandatory=$true)][string]$OsName,
@@ -1252,13 +1252,13 @@ function Ensure-AllMSUsPresent {
     [Parameter(Mandatory=$true)][bool]$ForceDownload
   )
 
-  Ensure-MSCatalogLTS
+  Initialize-MSCatalogLTS
 
   $existing = @(Get-ChildItem -LiteralPath $IsoFolder -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.msu','.cab') })
   $needDownload = $ForceDownload -or ($existing.Count -lt 1)
 
   if (-not $needDownload) {
-    V ("Updates already present in ISO folder ({0}); skipping download. Use -UpdateMSUs or -CleanMSUs to refresh." -f $existing.Count)
+    Write-Log ("Updates already present in ISO folder ({0}); skipping download. Use -UpdateMSUs or -CleanMSUs to refresh." -f $existing.Count)
     return [pscustomobject]@{ Selected=[ordered]@{}; Downloaded=@() }
   }
 
@@ -1277,22 +1277,22 @@ function Ensure-AllMSUsPresent {
 
   $selected = [ordered]@{}
 
-  $lcuPick = Pick-LatestByCategoryPreferMonth -Results $results -Category 'LCU' -PreferYYYYMM $null
+  $lcuPick = Select-LatestByCategoryPreferMonth -Results $results -Category 'LCU' -PreferYYYYMM $null
   if (-not $lcuPick) {
      Write-Host "Could not find a catalog entry for LCU ($OsName $ReleaseToken $Arch) using broad search."
      return [pscustomobject]@{}
   }
 
-  $lcuYM = (Parse-YYYYMMFromTitle $lcuPick.Title)
+  $lcuYM = (Get-YYYYMMFromTitle $lcuPick.Title)
   $selected['LCU'] = [pscustomobject]@{
-    Category='LCU'; Title=$lcuPick.Title; KB=(Extract-KBFromTitle $lcuPick.Title); YM=$lcuYM; Item=$lcuPick
+    Category='LCU'; Title=$lcuPick.Title; KB=(Get-KBFromTitle $lcuPick.Title); YM=$lcuYM; Item=$lcuPick
   }
 
   foreach ($cat in @('SetupDU','SafeOS','SSU','DotNet')) {
-    $pick = Pick-LatestByCategoryPreferMonth -Results $results -Category $cat -PreferYYYYMM $lcuYM
+    $pick = Select-LatestByCategoryPreferMonth -Results $results -Category $cat -PreferYYYYMM $lcuYM
     if ($pick) {
       $selected[$cat] = [pscustomobject]@{
-        Category=$cat; Title=$pick.Title; KB=(Extract-KBFromTitle $pick.Title); YM=(Parse-YYYYMMFromTitle $pick.Title); Item=$pick
+        Category=$cat; Title=$pick.Title; KB=(Get-KBFromTitle $pick.Title); YM=(Get-YYYYMMFromTitle $pick.Title); Item=$pick
       }
     }
   }
@@ -1311,7 +1311,7 @@ function Ensure-AllMSUsPresent {
     try {
       Save-CatalogUpdateAllFiles -CatalogItem $selected[$cat].Item -DestinationFolder $IsoFolder
     } catch {
-      Fail "Download failed for '$t': $($_.Exception.Message)"
+      Stop-Script "Download failed for '$t': $($_.Exception.Message)"
     }
   }
 
@@ -1344,7 +1344,7 @@ function Get-ArchFromPath([string]$p) {
 # ==============================
 # DU folder preparation (copy both MSU and CAB where relevant)
 # ==============================
-function Prepare-DUFolders {
+function Initialize-DUFolders {
   param(
     [Parameter(Mandatory=$true)][string]$DuRoot,
     [Parameter(Mandatory=$true)][string]$IsoFolder,
@@ -1355,19 +1355,19 @@ function Prepare-DUFolders {
   $all = @(Get-ChildItem -LiteralPath $IsoFolder -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.msu','.cab') })
   $allPaths = @($all | Select-Object -ExpandProperty FullName)
   if ($allPaths.Count -lt 1) {
-    Fail "No MSU/CAB files found in ISO folder: $IsoFolder. MSUs must be present to proceed."
+    Stop-Script "No MSU/CAB files found in ISO folder: $IsoFolder. MSUs must be present to proceed."
   }
 
   # Clean and recreate DU root (removes stale KB folders)
-  V "Cleaning DU root structure: $DuRoot"
+  Write-Log "Cleaning DU root structure: $DuRoot"
   if (Test-Path $DuRoot) {
     try { Remove-Item -Path $DuRoot -Recurse -Force -ErrorAction SilentlyContinue } catch {}
   }
-  Ensure-Folder $DuRoot
+  New-Folder $DuRoot
 
   # Extract KB numbers from each MSU/CAB file and organize into KB-named folders
   # Filter by detected architecture
-  V "Organizing MSU/CAB files by KB number into: $DuRoot (filtering for $($script:State.DetectedArch))"
+  Write-Log "Organizing MSU/CAB files by KB number into: $DuRoot (filtering for $($script:State.DetectedArch))"
   $kbMap = @{}
   foreach ($f in $allPaths) {
     $kb = Get-KbNumberFromPath -p $f
@@ -1379,7 +1379,7 @@ function Prepare-DUFolders {
     # Filter by detected architecture
     $fileArch = Get-ArchFromPath -p $f
     if ($fileArch -and $fileArch -ne $script:State.DetectedArch) {
-      V ("Skipping {0} (arch {1} does not match detected {2})" -f (Split-Path -Leaf $f), $fileArch, $script:State.DetectedArch)
+      Write-Log ("Skipping {0} (arch {1} does not match detected {2})" -f (Split-Path -Leaf $f), $fileArch, $script:State.DetectedArch)
       continue
     }
     
@@ -1396,31 +1396,31 @@ function Prepare-DUFolders {
       $arch = Get-ArchFromPath -p $f
       Write-Host ("  {0} (arch: {1})" -f (Split-Path -Leaf $f), ($arch -or "unknown")) -ForegroundColor Yellow
     }
-    Fail "No valid MSU/CAB files found after filtering. Check architecture match."
+    Stop-Script "No valid MSU/CAB files found after filtering. Check architecture match."
   }
 
-  V "KB map contains: $($kbMap.Count) entries"
-  V "KB numbers: $($kbMap.Keys -join ', ')"
+  Write-Log "KB map contains: $($kbMap.Count) entries"
+  Write-Log "KB numbers: $($kbMap.Keys -join ', ')"
   
   # Create KB-numbered folders and copy files
-  V "Creating KB-numbered folders under DU root"
+  Write-Log "Creating KB-numbered folders under DU root"
   $kbFolders = [ordered]@{}
   $sortedKbs = @($kbMap.Keys | Sort-Object { [int]$_ })
-  V "Sorted KB numbers: $($sortedKbs -join ', ')"
+  Write-Log "Sorted KB numbers: $($sortedKbs -join ', ')"
   
   foreach ($kb in $sortedKbs) {
     $kb = [int]$kb  # Ensure $kb is an integer, not string
     $kbKey = "KB$kb"  # Use string key to avoid hashtable index limits
-    V "Processing $kbKey"
+    Write-Log "Processing $kbKey"
     $kbFolder = Join-Path $DuRoot $kbKey
-    Ensure-Folder $kbFolder
+    New-Folder $kbFolder
     
     $kbFolders[$kbKey] = $kbFolder
 
     foreach ($f in $kbMap[$kb]) {
       $fname = Split-Path -Leaf $f
       Copy-Item -Path $f -Destination (Join-Path $kbFolder $fname) -Force
-      V ("  Copied {0} -> {1}" -f $fname, $kbKey)
+      Write-Log ("  Copied {0} -> {1}" -f $fname, $kbKey)
     }
   }
 
@@ -1451,7 +1451,7 @@ function Add-PackagesByFileListToMountedImage {
   foreach ($f in $PackageFiles) { $args += "/PackagePath:$f" }
 
   $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList $args -StepName $StepLabel
-  if ($rc -ne 0) { Fail "DISM Add-Package failed (exit $rc). See log: $LogPath" }
+  if ($rc -ne 0) { Stop-Script "DISM Add-Package failed (exit $rc). See log: $LogPath" }
 }
 
 function Add-PackagesFromKBFolder {
@@ -1470,17 +1470,17 @@ function Add-PackagesFromKBFolder {
   $packages += @(Get-ChildItem -LiteralPath $KbFolder -Filter "*.cab" -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -ExpandProperty FullName)
 
   if ($packages.Count -lt 1) {
-    V ("No packages found in KB{0}; skipping." -f $KbNumber)
+    Write-Log ("No packages found in KB{0}; skipping." -f $KbNumber)
     return
   }
 
-  V ("Installing {0} package(s) from KB{1} to {2}" -f $packages.Count, $KbNumber, $ContextLabel)
+  Write-Log ("Installing {0} package(s) from KB{1} to {2}" -f $packages.Count, $KbNumber, $ContextLabel)
 
   foreach ($pkg in $packages) {
     $leaf = Split-Path $pkg -Leaf
-    $pkgLog = $LogBasePath.Replace(".log", ("_KB{0}_{1}.log" -f $KbNumber, (Sanitize-Token $leaf)))
+    $pkgLog = $LogBasePath.Replace(".log", ("_KB{0}_{1}.log" -f $KbNumber, (Protect-Token $leaf)))
 
-    V ("Adding package: {0}" -f $leaf)
+    Write-Log ("Adding package: {0}" -f $leaf)
     $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
       "/Image:$MountDir",
       "/Add-Package",
@@ -1500,10 +1500,10 @@ function Add-PackagesFromKBFolder {
         "/ScratchDir:$ScratchRoot",
         "/LogPath:$pkgLog"
       ) -StepName ("Retry Add-Package KB{0}: {1} ({2})" -f $KbNumber, $leaf, $ContextLabel)
-      if ($rc2 -ne 0) { Fail "DISM Add-Package failed after retry (exit $rc2). See log: $pkgLog" }
+      if ($rc2 -ne 0) { Stop-Script "DISM Add-Package failed after retry (exit $rc2). See log: $pkgLog" }
     }
     elseif ($rc -ne 0) {
-      Fail "DISM Add-Package failed (exit $rc). See log: $pkgLog"
+      Stop-Script "DISM Add-Package failed (exit $rc). See log: $pkgLog"
     }
   }
 }
@@ -1532,7 +1532,7 @@ function Add-CuPackagesOrdered {
 # ==============================
 # WinRE-in-OS servicing helper
 # ==============================
-function Service-WinREInsideMountedOS {
+function Update-WinREInsideMountedOS {
   param(
     [Parameter(Mandatory=$true)][string]$OsMountDir,
     [Parameter(Mandatory=$true)][string]$OsName,
@@ -1544,24 +1544,24 @@ function Service-WinREInsideMountedOS {
 
   $winrePath = Join-Path $OsMountDir 'Windows\System32\Recovery\winre.wim'
   if (-not (Test-Path $winrePath)) {
-    V ("WinRE not found for OS: {0} (index {1}); skipping WinRE servicing." -f $OsName, $OsIndex)
+    Write-Log ("WinRE not found for OS: {0} (index {1}); skipping WinRE servicing." -f $OsName, $OsIndex)
     return
   }
 
-  $nameTag = Sanitize-Token $OsName
+  $nameTag = Protect-Token $OsName
   $tmp = Join-Path $script:State.MountRoot ("winre_{0}_idx{1}" -f $nameTag, $OsIndex)
   $tmpWim = Join-Path $tmp "winre.wim"
   $mDir  = Join-Path $tmp "MOUNT"
-  Ensure-Folder $tmp
-  Ensure-Folder $mDir
+  New-Folder $tmp
+  New-Folder $mDir
 
-  V ("Copy winre.wim for OS: {0} (index {1})" -f $OsName, $OsIndex)
+  Write-Log ("Copy winre.wim for OS: {0} (index {1})" -f $OsName, $OsIndex)
   Invoke-Step ("Copy winre.wim for OS: $OsName (index $OsIndex)") { Copy-Item -Path $winrePath -Destination $tmpWim -Force } | Out-Null
 
-  Ensure-ImageNotMounted -ImageFile $tmpWim -Index 1
+  Assert-ImageNotMounted -ImageFile $tmpWim -Index 1
 
   $mountLog = Join-Path $LogsRoot ("dism_mount_winre_{0}_idx{1}.log" -f $nameTag, $OsIndex)
-  V ("Mount WinRE for {0} (index {1})" -f $OsName, $OsIndex)
+  Write-Log ("Mount WinRE for {0} (index {1})" -f $OsName, $OsIndex)
   $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
     "/Mount-Image",
     "/ImageFile:$tmpWim",
@@ -1582,7 +1582,7 @@ function Service-WinREInsideMountedOS {
     Add-CuPackagesOrdered -MountDir $mDir -KbFolders $KbFolders -ScratchRoot $ScratchRoot -LogBasePath $cuBase -ContextLabel ("WinRE {0}" -f $OsName)
   }
   finally {
-    V ("Unmount and commit WinRE for {0} (index {1})" -f $OsName, $OsIndex)
+    Write-Log ("Unmount and commit WinRE for {0} (index {1})" -f $OsName, $OsIndex)
     $rc2 = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
       "/Unmount-Image",
       "/MountDir:$mDir",
@@ -1598,7 +1598,7 @@ function Service-WinREInsideMountedOS {
 # ==============================
 # WIM servicing (install.wim, boot.wim)
 # ==============================
-function Service-InstallWimIndex {
+function Update-InstallWimIndex {
   param(
     [string]$WimPath,
     [int]$Index,
@@ -1609,7 +1609,7 @@ function Service-InstallWimIndex {
     [string]$ScratchRoot
   )
 
-  $nameTag = Sanitize-Token $IndexName
+  $nameTag = Protect-Token $IndexName
 
   Write-Host ("Servicing OS: {0} (index {1})" -f $IndexName, $Index) -ForegroundColor Cyan
 
@@ -1621,9 +1621,9 @@ function Service-InstallWimIndex {
     New-Item -ItemType Directory -Path $mountDir -Force | Out-Null
   } | Out-Null
 
-  Ensure-ImageNotMounted -ImageFile $WimPath -Index $Index
+  Assert-ImageNotMounted -ImageFile $WimPath -Index $Index
 
-  V ("Mount OS image: {0} (index {1})" -f $IndexName, $Index)
+  Write-Log ("Mount OS image: {0} (index {1})" -f $IndexName, $Index)
   $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
     "/Mount-Image",
     "/ImageFile:$WimPath",
@@ -1644,10 +1644,10 @@ function Service-InstallWimIndex {
     Add-CuPackagesOrdered -MountDir $mountDir -KbFolders $KbFolders -ScratchRoot $ScratchRoot -LogBasePath $cuBase -ContextLabel ("OS {0}" -f $IndexName)
 
     # Service WinRE inside this OS image (if it exists)
-    Service-WinREInsideMountedOS -OsMountDir $mountDir -OsName $IndexName -OsIndex $Index -KbFolders $KbFolders -ScratchRoot $ScratchRoot -LogsRoot $LogsRoot
+    Update-WinREInsideMountedOS -OsMountDir $mountDir -OsName $IndexName -OsIndex $Index -KbFolders $KbFolders -ScratchRoot $ScratchRoot -LogsRoot $LogsRoot
   }
   finally {
-    V ("Unmount and commit OS image: {0} (index {1})" -f $IndexName, $Index)
+    Write-Log ("Unmount and commit OS image: {0} (index {1})" -f $IndexName, $Index)
     $rc2 = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
       "/Unmount-Image",
       "/MountDir:$mountDir",
@@ -1658,7 +1658,7 @@ function Service-InstallWimIndex {
   }
 }
 
-function Service-BootWim {
+function Update-BootWim {
   param(
     [Parameter(Mandatory=$true)][string]$BootWimPath,
     [Parameter(Mandatory=$true)][hashtable]$KbFolders,
@@ -1674,7 +1674,7 @@ function Service-BootWim {
   foreach ($idx in $idxs) {
     $nm = ($pairs | Where-Object { $_.Index -eq $idx } | Select-Object -First 1).Name
     if (-not $nm) { $nm = "<unknown>" }
-    $nameTag = Sanitize-Token $nm
+    $nameTag = Protect-Token $nm
 
     Write-Host ("Servicing boot.wim: {0} (index {1})" -f $nm, $idx) -ForegroundColor Cyan
 
@@ -1686,9 +1686,9 @@ function Service-BootWim {
       New-Item -ItemType Directory -Path $mountDir -Force | Out-Null
     } | Out-Null
 
-    Ensure-ImageNotMounted -ImageFile $BootWimPath -Index $idx
+    Assert-ImageNotMounted -ImageFile $BootWimPath -Index $idx
 
-    V ("Mount boot.wim: {0} (index {1})" -f $nm, $idx)
+    Write-Log ("Mount boot.wim: {0} (index {1})" -f $nm, $idx)
     $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
       "/Mount-Image",
       "/ImageFile:$BootWimPath",
@@ -1709,7 +1709,7 @@ function Service-BootWim {
       Add-CuPackagesOrdered -MountDir $mountDir -KbFolders $KbFolders -ScratchRoot $ScratchRoot -LogBasePath $cuBase -ContextLabel ("boot.wim {0}" -f $nm)
     }
     finally {
-      V ("Unmount and commit boot.wim: {0} (index {1})" -f $nm, $idx)
+      Write-Log ("Unmount and commit boot.wim: {0} (index {1})" -f $nm, $idx)
       $rc2 = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
         "/Unmount-Image",
         "/MountDir:$mountDir",
@@ -1727,21 +1727,21 @@ function Service-BootWim {
 function Build-Iso([string]$IsoRoot, [string]$OutputIso) {
   $etfs = Join-Path $IsoRoot $Config.BootFileBIOS
   $efis = Join-Path $IsoRoot $Config.BootFileUEFI
-  if (-not (Test-Path $etfs)) { Fail "Missing BIOS boot file: $etfs" }
-  if (-not (Test-Path $efis)) { Fail "Missing UEFI boot file: $efis" }
+  if (-not (Test-Path $etfs)) { Stop-Script "Missing BIOS boot file: $etfs" }
+  if (-not (Test-Path $efis)) { Stop-Script "Missing UEFI boot file: $efis" }
 
   $bootdata = "2#p0,e,b$etfs#pEF,e,b$efis"
   $args = @() + $Config.OscdimgFsArgs + @("-l$($Config.IsoVolumeLabel)", "-bootdata:$bootdata", $IsoRoot, $OutputIso)
 
   Write-Host "Building ISO: $OutputIso" -ForegroundColor Green
   $rc = Invoke-External -FilePath $script:State.OscdimgPath -ArgumentList $args -StepName "OSCDIMG Build ISO"
-  if ($rc -ne 0) { Fail "oscdimg failed with exit code $rc" }
+  if ($rc -ne 0) { Stop-Script "oscdimg failed with exit code $rc" }
 }
 
 # ==============================
 # Cleanup
 # ==============================
-function Cleanup-Hardened {
+function Clear-Hardened {
   param(
     [switch]$Aggressive,
     [switch]$FromCancel
@@ -1750,14 +1750,14 @@ function Cleanup-Hardened {
   try { Stop-TrackedChildren } catch {}
 
   if ($Aggressive) {
-    try { Kill-DismProcessesForWorkRoot -WorkRoot $script:State.WorkRoot } catch {}
+    try { Stop-DismProcessesForWorkRoot -WorkRoot $script:State.WorkRoot } catch {}
   }
 
   try {
     if ($script:State.MountRoot) {
-      Preflight-CleanupDismMounts -RelevantImageFiles @() -RelevantMountRoot $script:State.MountRoot
+      Clear-PreflightDismMounts -RelevantImageFiles @() -RelevantMountRoot $script:State.MountRoot
     } else {
-      Cleanup-DismMountPoints
+      Clear-DismMountPoints
     }
   } catch {}
 
@@ -1811,7 +1811,7 @@ for ($i = 0; $i -lt $args.Count; $i++) {
     '^(?:-Home)$'              { $SelectHome = $true; continue }
     '^(?:-Pro)$'               { $SelectPro = $true; continue }
     '^(?:-Indices)$' {
-      if ($i + 1 -ge $args.Count) { Fail "-Indices requires one or more selector tokens" }
+      if ($i + 1 -ge $args.Count) { Stop-Script "-Indices requires one or more selector tokens" }
       $vals = New-Object System.Collections.Generic.List[string]
       $j = $i + 1
       while ($j -lt $args.Count) {
@@ -1830,9 +1830,9 @@ for ($i = 0; $i -lt $args.Count; $i++) {
     '^(?:-ISO)$'     { $IsoPath = $args[++$i]; continue }
     '^(?:-SrcISO)$'  { $IsoPath = $args[++$i]; continue }
     '^(?:-DestISO)$' { $DestIsoPath = $args[++$i]; continue }
-    '^-{1,2}.*'      { Fail "Unknown switch: $a" }
+    '^-{1,2}.*'      { Stop-Script "Unknown switch: $a" }
     default {
-      if ($FolderArg) { Fail "Only one folder argument allowed. Extra value: $a" }
+      if ($FolderArg) { Stop-Script "Only one folder argument allowed. Extra value: $a" }
       $FolderArg = $a
     }
   }
@@ -1850,13 +1850,13 @@ Resolve-Tools -ExplicitDism $ExplicitDism -ExplicitOscdimg $ExplicitOscdimg -Use
 
 try {
   $folderPath = (Resolve-Path -LiteralPath $FolderArg -ErrorAction SilentlyContinue).Path
-  if (-not $folderPath) { Fail "Folder not found: $FolderArg" }
+  if (-not $folderPath) { Stop-Script "Folder not found: $FolderArg" }
 
   # Resolve ISO path (new run) or meta (update run)
   if (-not $UpdateISO) {
     if ($IsoPath) {
       $script:State.IsoPath = (Resolve-Path -LiteralPath $IsoPath -ErrorAction SilentlyContinue).Path
-      if (-not $script:State.IsoPath) { Fail "ISO file not found: $IsoPath" }
+      if (-not $script:State.IsoPath) { Stop-Script "ISO file not found: $IsoPath" }
       $isoDir = Split-Path -Parent $script:State.IsoPath
     } else {
       $script:State.IsoPath = Get-InputIso -FolderPath $folderPath
@@ -1866,9 +1866,9 @@ try {
   } else {
     $workBase = if ($UseSystemTemp) { [System.IO.Path]::GetTempPath() } else { Join-Path $folderPath $Config.WorkParentSubfolder }
     $metaFiles = Get-ChildItem -LiteralPath $workBase -Filter $Config.MetaFileName -Recurse -File -ErrorAction SilentlyContinue
-    if ($metaFiles.Count -ne 1) { Fail "UpdateISO requires exactly one meta file under $workBase. Found $($metaFiles.Count)." }
+    if ($metaFiles.Count -ne 1) { Stop-Script "UpdateISO requires exactly one meta file under $workBase. Found $($metaFiles.Count)." }
     $meta = Read-Meta -MetaPath $metaFiles[0].FullName
-    if (-not $meta) { Fail "Failed to read meta file: $($metaFiles[0].FullName)" }
+    if (-not $meta) { Stop-Script "Failed to read meta file: $($metaFiles[0].FullName)" }
 
     $script:State.IsoPath = $meta["ISOPath"]
     $script:State.IsoBaseName = $meta["IsoBaseName"]
@@ -1887,7 +1887,7 @@ try {
   if ($DestIsoPath) {
     $destDir = Split-Path -Parent $DestIsoPath
     $destDir = (Resolve-Path -LiteralPath $destDir -ErrorAction SilentlyContinue).Path
-    if (-not $destDir) { Fail "Destination directory not found: $(Split-Path -Parent $DestIsoPath)" }
+    if (-not $destDir) { Stop-Script "Destination directory not found: $(Split-Path -Parent $DestIsoPath)" }
     $script:State.OutputIsoPath = Join-Path $destDir ([IO.Path]::GetFileName($DestIsoPath))
   } elseif (-not $script:State.OutputIsoPath) {
     $baseName = [IO.Path]::GetFileNameWithoutExtension($script:State.IsoPath)
@@ -1904,13 +1904,13 @@ try {
 
   # PREP always runs
   $script:DryRunPhase = 'prep'
-  Ensure-Folder $script:State.WorkRoot
-  Ensure-Folder $script:State.IsoRoot
-  Ensure-Folder $script:State.InstallRoot
-  Ensure-Folder $script:State.MountRoot
-  Ensure-Folder $script:State.LogsRoot
-  Ensure-Folder $script:State.ScratchRoot
-  Ensure-Folder $script:State.DuRoot
+  New-Folder $script:State.WorkRoot
+  New-Folder $script:State.IsoRoot
+  New-Folder $script:State.InstallRoot
+  New-Folder $script:State.MountRoot
+  New-Folder $script:State.LogsRoot
+  New-Folder $script:State.ScratchRoot
+  New-Folder $script:State.DuRoot
 
   # ISO extract (only if not UpdateISO)
   if (-not $UpdateISO) {
@@ -1932,7 +1932,7 @@ try {
 
   # Ensure $WinpeDriver$ exists in ISO root
   $driverFolderOnIso = Join-Path $script:State.IsoRoot $Config.DriverFolderName
-  Ensure-Folder $driverFolderOnIso
+  New-Folder $driverFolderOnIso
   $driverReadme = Join-Path $driverFolderOnIso "README.txt"
   if (-not (Test-Path $driverReadme)) {
     Set-Content -Path $driverReadme -Encoding ASCII -Value @(
@@ -1942,7 +1942,7 @@ try {
   }
 
   $isoSources = Join-Path $script:State.IsoRoot 'sources'
-  if (-not (Test-Path $isoSources)) { Fail "ISO sources directory not found: $isoSources" }
+  if (-not (Test-Path $isoSources)) { Stop-Script "ISO sources directory not found: $isoSources" }
 
   # Write SetupConfig + launchers into ISO root
   Write-SetupConfigFiles -IsoRoot $script:State.IsoRoot
@@ -1953,16 +1953,16 @@ try {
   $stashEsd = Join-Path $script:State.InstallRoot 'install.esd'
   if (-not (Test-Path $stashWim) -and -not (Test-Path $stashEsd)) {
     $srcInstall = Get-InstallImagePathFromRoot -Root $script:State.IsoRoot
-    if (-not $srcInstall) { Fail "Could not find sources\install.wim or sources\install.esd in ISO tree." }
+    if (-not $srcInstall) { Stop-Script "Could not find sources\install.wim or sources\install.esd in ISO tree." }
     Move-Item -Path $srcInstall -Destination (Join-Path $script:State.InstallRoot (Split-Path -Leaf $srcInstall)) -Force
   }
 
   if (-not $script:State.StashedInstallWim) {
-    $script:State.StashedInstallWim = Ensure-StashedInstallWim -InstallRoot $script:State.InstallRoot
+    $script:State.StashedInstallWim = Initialize-StashedInstallWim -InstallRoot $script:State.InstallRoot
   }
-  if (-not $script:State.StashedInstallWim) { Fail "INSTALL stash does not contain install.wim or install.esd." }
+  if (-not $script:State.StashedInstallWim) { Stop-Script "INSTALL stash does not contain install.wim or install.esd." }
 
-  Detect-MediaInfoFromInstallWim -InstallWim $script:State.StashedInstallWim
+  Get-MediaInfoFromInstallWim -InstallWim $script:State.StashedInstallWim
   Show-RunBanner
 
   # AFTER PREP
@@ -1974,8 +1974,8 @@ try {
   $maxIndex = ($pairs | Measure-Object -Property Index -Maximum).Maximum
   $nameMap = Get-IndexNameMap -Pairs $pairs
 
-  V ("install.wim stash: {0}" -f $script:State.StashedInstallWim)
-  V ("Found {0} WIM indices; max index = {1}" -f $pairs.Count, $maxIndex)
+  Write-Log ("install.wim stash: {0}" -f $script:State.StashedInstallWim)
+  Write-Log ("Found {0} WIM indices; max index = {1}" -f $pairs.Count, $maxIndex)
   if ($VerbosePreference -eq 'Continue') {
     Write-Host "Available indices (index : name):" -ForegroundColor Cyan
     foreach ($p in $pairs) { Write-Host ("  {0}: {1}" -f $p.Index, $p.Name) -ForegroundColor Cyan }
@@ -2003,7 +2003,7 @@ try {
       if ($SelectPro)  { $selected += (Resolve-LabelTokenToIndices -Pairs $pairs -Token "Pro") }
 
       if ($IndicesSpec -and ([string]$IndicesSpec).Trim() -ne "") {
-        $parsed = Parse-IndicesSpec -Spec ([string]$IndicesSpec) -MaxIndex $maxIndex -Pairs $pairs
+        $parsed = ConvertFrom-IndicesSpec -Spec ([string]$IndicesSpec) -MaxIndex $maxIndex -Pairs $pairs
         if ($parsed.InvalidTokens.Count -gt 0 -or $parsed.InvalidIndices.Count -gt 0 -or $parsed.InvalidLabels.Count -gt 0) {
           Write-Host "Invalid selection detected:" -ForegroundColor Red
           if ($parsed.InvalidTokens.Count -gt 0)  { Write-Host ("  Invalid tokens: " + ($parsed.InvalidTokens -join ", ")) -ForegroundColor Red }
@@ -2018,7 +2018,7 @@ try {
       }
 
       $selected = @($selected | Sort-Object -Unique)
-      if ($selected.Count -lt 1) { Fail "Selection resulted in an empty set." }
+      if ($selected.Count -lt 1) { Stop-Script "Selection resulted in an empty set." }
     }
   }
 
@@ -2048,39 +2048,39 @@ try {
   # Rebuild ISO\sources\install.wim if requested
   $wimToService = $null
   if ($doRebuild) {
-    $wimToService = Rebuild-InstallWimFromSelection -StashedWim $script:State.StashedInstallWim -IsoSourcesDir $isoSources -SelectedSourceIndices $selected -MaxSourceIndex $maxIndex
+    $wimToService = Build-InstallWimFromSelection -StashedWim $script:State.StashedInstallWim -IsoSourcesDir $isoSources -SelectedSourceIndices $selected -MaxSourceIndex $maxIndex
   } else {
     $wimToService = Join-Path $isoSources 'install.wim'
     if (-not (Test-Path $wimToService)) {
-      Fail "Skipped rebuild, but ISO\sources\install.wim is missing. Specify indices to force rebuild."
+      Stop-Script "Skipped rebuild, but ISO\sources\install.wim is missing. Specify indices to force rebuild."
     }
   }
 
   # Update cache semantics
-  if ($CleanMSUs) { Clean-MsuFolder -FolderPath $isoDir }
+  if ($CleanMSUs) { Clear-MsuFolder -FolderPath $isoDir }
 
   if ($doDownload) {
     $force = [bool]$UpdateMSUs -or [bool]$CleanMSUs
     if ($force) { Write-Host "[UpdateMSUs/CleanMSUs] Forcing update download/refresh..." -ForegroundColor Yellow }
     else { Write-Host "Ensuring updates exist next to ISO (download if missing)..." -ForegroundColor Yellow }
 
-    $catalogInfo = Ensure-AllMSUsPresent -IsoFolder $isoDir -OsName $script:State.DetectedOS -ReleaseToken $script:State.DetectedRelease -Arch $script:State.DetectedArch -ForceDownload $force
+    $catalogInfo = Initialize-AllMSUsPresent -IsoFolder $isoDir -OsName $script:State.DetectedOS -ReleaseToken $script:State.DetectedRelease -Arch $script:State.DetectedArch -ForceDownload $force
   }
 
   $localUpdates = @(Get-ChildItem -LiteralPath $isoDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.msu','.cab') })
   if ($localUpdates.Count -gt 0) {
     # Organize MSU/CAB files into KB-numbered folders under DU/
     # Returns hashtable of @{ [KB number] = [KB folder path] }
-    $kbFolders = Prepare-DUFolders -DuRoot $script:State.DuRoot -IsoFolder $isoDir -CatalogInfo $catalogInfo
+    $kbFolders = Initialize-DUFolders -DuRoot $script:State.DuRoot -IsoFolder $isoDir -CatalogInfo $catalogInfo
 
     # Preflight: cleanup DISM mount state before servicing
     $bootWim = Join-Path $isoSources 'boot.wim'
     $relevant = @($wimToService)
     if (Test-Path $bootWim) { $relevant += $bootWim }
-    Preflight-CleanupDismMounts -RelevantImageFiles $relevant -RelevantMountRoot $script:State.MountRoot
+    Clear-PreflightDismMounts -RelevantImageFiles $relevant -RelevantMountRoot $script:State.MountRoot
 
     # Service install.wim indices: mount each index, apply all KB packages in numeric order
-    V "Starting install.wim servicing"
+    Write-Log "Starting install.wim servicing"
     $rebuiltPairs = Get-WimPairs -InstallPath $wimToService
     $rebuiltNameMap = Get-IndexNameMap -Pairs $rebuiltPairs
     $serviceIndexes = @($rebuiltPairs | Select-Object -ExpandProperty Index)
@@ -2089,14 +2089,14 @@ try {
     foreach ($idx in $serviceIndexes) {
       Assert-NotCancelled
       $nm = $rebuiltNameMap[[int]$idx]; if (-not $nm) { $nm = "<unknown>" }
-      Service-InstallWimIndex -WimPath $wimToService -Index $idx -IndexName $nm -KbFolders $kbFolders -MountRoot $script:State.MountRoot -LogsRoot $script:State.LogsRoot -ScratchRoot $script:State.ScratchRoot
+      Update-InstallWimIndex -WimPath $wimToService -Index $idx -IndexName $nm -KbFolders $kbFolders -MountRoot $script:State.MountRoot -LogsRoot $script:State.LogsRoot -ScratchRoot $script:State.ScratchRoot
     }
 
     # Service boot.wim (WinPE/Setup) with all KB packages in numeric order
     if (Test-Path $bootWim) {
-      V "Starting boot.wim servicing"
+      Write-Log "Starting boot.wim servicing"
       Write-Host "Servicing boot.wim (WinPE)..." -ForegroundColor Cyan
-      Service-BootWim -BootWimPath $bootWim -KbFolders $kbFolders -MountRoot $script:State.MountRoot -LogsRoot $script:State.LogsRoot -ScratchRoot $script:State.ScratchRoot
+      Update-BootWim -BootWimPath $bootWim -KbFolders $kbFolders -MountRoot $script:State.MountRoot -LogsRoot $script:State.LogsRoot -ScratchRoot $script:State.ScratchRoot
     } else {
       Write-Host "WARNING: ISO\sources\boot.wim not found; skipping WinPE/Setup servicing." -ForegroundColor Yellow
     }
@@ -2115,5 +2115,5 @@ catch [System.OperationCanceledException] {
   Write-Host "Operation cancelled." -ForegroundColor Yellow
 }
 finally {
-  Cleanup-Hardened -Aggressive:($script:Cancelled) -FromCancel:($script:Cancelled)
+  Clear-Hardened -Aggressive:($script:Cancelled) -FromCancel:($script:Cancelled)
 }
