@@ -5,6 +5,9 @@ on:
     branches:
       - '**'      # Triggers on push to any branch
 
+permissions:
+  contents: write
+
 jobs:
   update-version:
     runs-on: windows-latest
