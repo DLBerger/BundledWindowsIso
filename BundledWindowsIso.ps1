@@ -1430,37 +1430,6 @@ function Initialize-DUFolders {
 # ==============================
 # Package application helpers (ordered CU + retry on 552)
 # ==============================
-function Add-PackagesByFileListToMountedImage {
-  param(
-    [Parameter(Mandatory=$true)][string]$MountDir,
-    [Parameter(Mandatory=$true)][string[]]$PackageFiles,
-    [Parameter(Mandatory=$true)][string]$ScratchRoot,
-    [Parameter(Mandatory=$true)][string]$LogPath,
-    [string]$StepLabel = "Add-Package",
-    [switch]$PassThru
-  )
-
-  if (-not $PackageFiles -or $PackageFiles.Count -lt 1) {
-    if ($PassThru) { return 0 }
-    return
-  }
-
-  $args = @(
-    "/Image:$MountDir",
-    "/Add-Package",
-    "/ScratchDir:$ScratchRoot",
-    "/LogPath:$LogPath"
-  )
-  foreach ($f in $PackageFiles) { $args += "/PackagePath:$f" }
-
-  $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList $args -StepName $StepLabel
-  if ($rc -ne 0) {
-    if ($PassThru) { return $rc }
-    Stop-Script "DISM Add-Package failed (exit $rc). See log: $LogPath"
-  }
-  if ($PassThru) { return 0 }
-}
-
 function Add-PackagesFromKBFolder {
   param(
     [Parameter(Mandatory=$true)][string]$MountDir,
@@ -1546,7 +1515,13 @@ function Add-CuPackagesOrdered {
       $label  = ("Add-Package {0} KB{1}: {2}" -f $ContextLabel, $kb, $leaf)
 
       Write-Verbose ("Adding package: KB{0} / {1}" -f $kb, $leaf)
-      $rc = Add-PackagesByFileListToMountedImage -MountDir $MountDir -PackageFiles @($pkg) -ScratchRoot $ScratchRoot -LogPath $pkgLog -StepLabel $label -PassThru
+      $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
+        "/Image:$MountDir",
+        "/Add-Package",
+        "/PackagePath:$pkg",
+        "/ScratchDir:$ScratchRoot",
+        "/LogPath:$pkgLog"
+      ) -StepName $label
 
       if ($rc -eq 0) {
         $succeeded += $pkg
