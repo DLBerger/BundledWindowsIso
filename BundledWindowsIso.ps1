@@ -162,7 +162,7 @@ $script:Name = "BundledWindowsIso.ps1"
 # ==============================
 # git information
 # ==============================
-$GitHash = "c6522f6"
+$GitHash = "ba0ef26"
 
 # ==============================
 # Script identity
@@ -901,7 +901,7 @@ function ConvertFrom-IndicesSpec {
 }
 
 # ==============================
-# ESD -> WIM
+# Install image stash detection
 # ==============================
 function Initialize-StashedInstallWim {
   param([string]$InstallRoot)
@@ -909,33 +909,8 @@ function Initialize-StashedInstallWim {
   $wim = Join-Path $InstallRoot 'install.wim'
   $esd = Join-Path $InstallRoot 'install.esd'
   if (Test-Path $wim) { return $wim }
-  if (-not (Test-Path $esd)) { return $null }
-
-  Write-Host "Converting INSTALL\install.esd to INSTALL\install.wim..." -ForegroundColor Cyan
-
-  $info = Invoke-DismRead -Args @("/Get-ImageInfo", "/ImageFile:$esd")
-  if ($LASTEXITCODE -ne 0) { Stop-Script "DISM failed to read install.esd." }
-
-  $indexes = @()
-  foreach ($line in $info) { if ($line -match '^\s*Index\s*:\s*(\d+)\s*$') { $indexes += [int]$Matches[1] } }
-  if ($indexes.Count -lt 1) { Stop-Script "Could not parse indexes from install.esd." }
-
-  if (Test-Path $wim) { Remove-Item -Path $wim -Force -ErrorAction SilentlyContinue | Out-Null }
-
-  foreach ($idx in $indexes) {
-    Assert-NotCancelled
-    $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
-      "/Export-Image",
-      "/SourceImageFile:$esd",
-      "/SourceIndex:$idx",
-      "/DestinationImageFile:$wim",
-      "/Compress:max",
-      "/CheckIntegrity"
-    ) -StepName ("Export-Image (ESD->WIM) idx {0}" -f $idx)
-
-    if ($rc -ne 0) { Stop-Script "DISM Export-Image failed for SourceIndex $idx (exit $rc)." }
-  }
-  return $wim
+  if (Test-Path $esd) { return $esd }
+  return $null
 }
 
 # ==============================
@@ -943,7 +918,7 @@ function Initialize-StashedInstallWim {
 # ==============================
 function Build-InstallWimFromSelection {
   param(
-    [string]$StashedWim,
+    [string]$SourceFile,
     [string]$IsoSourcesDir,
     [int[]]$SelectedSourceIndices,
     [int]$MaxSourceIndex
@@ -957,10 +932,11 @@ function Build-InstallWimFromSelection {
     if (Test-Path $dstEsd) { Remove-Item -Path $dstEsd -Force -ErrorAction SilentlyContinue | Out-Null }
   } | Out-Null
 
+  $isWimSource = $SourceFile -like '*.wim'
   $allSelected = ($SelectedSourceIndices.Count -eq $MaxSourceIndex)
-  if ($allSelected) {
+  if ($isWimSource -and $allSelected) {
     Write-Host "All indices selected; copying full install.wim to ISO\sources..." -ForegroundColor Cyan
-    Invoke-Step "Copy full install.wim (all indices) to ISO\sources" { Copy-Item -Path $StashedWim -Destination $dstWim -Force } | Out-Null
+    Invoke-Step "Copy full install.wim (all indices) to ISO\sources" { Copy-Item -Path $SourceFile -Destination $dstWim -Force } | Out-Null
 
     Write-Host "ISO\sources\install.wim contains:" -ForegroundColor Cyan
     $pairs = Get-WimPairs -InstallPath $dstWim
@@ -969,11 +945,12 @@ function Build-InstallWimFromSelection {
     return $dstWim
   }
 
-  $srcPairs = Get-WimPairs -InstallPath $StashedWim
+  $srcPairs = Get-WimPairs -InstallPath $SourceFile
   $nameMap = Get-IndexNameMap -Pairs $srcPairs
 
-  Write-Host "Rebuilding ISO\sources\install.wim from selected indices..." -ForegroundColor Cyan
-  Write-Host ("  Source WIM: {0}" -f $StashedWim) -ForegroundColor Cyan
+  $sourceType = if ($isWimSource) { 'WIM' } else { 'ESD' }
+  Write-Host ("Building ISO\sources\install.wim from selected {0} indices..." -f $sourceType) -ForegroundColor Cyan
+  Write-Host ("  Source: {0}" -f $SourceFile) -ForegroundColor Cyan
   Write-Host ("  Dest WIM:   {0}" -f $dstWim) -ForegroundColor Cyan
   Write-Host ""
 
@@ -989,7 +966,7 @@ function Build-InstallWimFromSelection {
 
     $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
       "/Export-Image",
-      "/SourceImageFile:$StashedWim",
+      "/SourceImageFile:$SourceFile",
       "/SourceIndex:$srcIndex",
       "/DestinationImageFile:$dstWim",
       "/Compress:max",
@@ -2034,7 +2011,7 @@ try {
   # Rebuild ISO\sources\install.wim if requested
   $wimToService = $null
   if ($doRebuild) {
-    $wimToService = Build-InstallWimFromSelection -StashedWim $script:State.StashedInstallWim -IsoSourcesDir $isoSources -SelectedSourceIndices $selected -MaxSourceIndex $maxIndex
+    $wimToService = Build-InstallWimFromSelection -SourceFile $script:State.StashedInstallWim -IsoSourcesDir $isoSources -SelectedSourceIndices $selected -MaxSourceIndex $maxIndex
   } else {
     $wimToService = Join-Path $isoSources 'install.wim'
     if (-not (Test-Path $wimToService)) {
