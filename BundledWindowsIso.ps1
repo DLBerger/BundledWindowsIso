@@ -162,7 +162,7 @@ $script:Name = "BundledWindowsIso.ps1"
 # ==============================
 # git information
 # ==============================
-$GitHash = "1964b1f"
+$GitHash = "d7738e1"
 
 # ==============================
 # Script identity
@@ -244,6 +244,11 @@ endlocal
   }
   CatalogExcludeTitleTokens = @('preview')
   CatalogDownloadAll        = $true
+  # Catalog search indexing uses Windows version labels (e.g., 24H2/25H2), not just base build numbers.
+  CatalogWindows11VersionBuildMap = @(
+    [pscustomobject]@{ MinBuild = 26200; MaxBuildExclusive = 26300; VersionLabel = 'Windows 11 Version 25H2' }
+    [pscustomobject]@{ MinBuild = 26100; MaxBuildExclusive = 26200; VersionLabel = 'Windows 11 Version 24H2' }
+  )
 
   PreflightCleanupMountPoints = $true
   PreflightUnmountMatchingMountedImages = $true
@@ -955,6 +960,7 @@ function Build-InstallWimFromSelection {
   Write-Host ""
 
   $destIndex = 0
+  $firstExport = $true
   foreach ($srcIndex in $SelectedSourceIndices) {
     Assert-NotCancelled
     $destIndex++
@@ -964,14 +970,21 @@ function Build-InstallWimFromSelection {
     Write-Host ("Exporting source index {0} -> destination index {1}" -f $srcIndex, $destIndex) -ForegroundColor Cyan
     Write-Host ("  Name: {0}" -f $srcName) -ForegroundColor Cyan
 
-    $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
+    $exportArgs = @(
       "/Export-Image",
       "/SourceImageFile:$SourceFile",
       "/SourceIndex:$srcIndex",
       "/DestinationImageFile:$dstWim",
       "/Compress:max",
       "/CheckIntegrity"
-    ) -StepName ("Export-Image {0} (src idx {1} -> dst idx {2})" -f $srcName, $srcIndex, $destIndex)
+    )
+    if (-not $firstExport) {
+      $exportArgs += "/Append"
+    } else {
+      $firstExport = $false
+    }
+
+    $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList $exportArgs -StepName ("Export-Image {0} (src idx {1} -> dst idx {2})" -f $srcName, $srcIndex, $destIndex)
 
     if ($rc -ne 0) { Stop-Script "DISM Export-Image failed for SourceIndex $srcIndex (exit $rc)." }
 
@@ -1140,6 +1153,29 @@ function Save-CatalogUpdateAllFiles {
   }
 }
 
+function Get-CatalogVersionLabelFromBuild {
+  param(
+    [Parameter(Mandatory=$true)][string]$OsName,
+    [Parameter(Mandatory=$true)][string]$OsBuild
+  )
+
+  if ($OsName -notmatch '(?i)^Windows\s+11\b') { return $null }
+
+  $m = [regex]::Match($OsBuild, '^\s*(\d+)\b')
+  if (-not $m.Success) { return $null }
+
+  $buildNumber = [int]$m.Groups[1].Value
+  $windows11VersionBuildMap = @($Config.CatalogWindows11VersionBuildMap)
+
+  foreach ($entry in $windows11VersionBuildMap) {
+    if ($buildNumber -ge $entry.MinBuild -and $buildNumber -lt $entry.MaxBuildExclusive) {
+      return $entry.VersionLabel
+    }
+  }
+
+  return $null
+}
+
 function Get-CatalogCandidatesBroad {
   param(
     [Parameter(Mandatory=$true)][string]$OsName,
@@ -1147,14 +1183,40 @@ function Get-CatalogCandidatesBroad {
     [Parameter(Mandatory=$true)][string]$Arch
   )
 
-  $broad = "$OsName Build $OsBuild"
-  Write-Host ("Catalog broad search: {0}" -f $broad) -ForegroundColor Cyan
-  try {
-    $res = @(Get-MSCatalogUpdate -Search $broad -Architecture $Arch -IncludeDynamic -AllPages)
-  } catch {
-    $res = @()
+  $versionLabel = Get-CatalogVersionLabelFromBuild -OsName $OsName -OsBuild $OsBuild
+
+  $searchAttempts = @(
+    "$OsName $OsBuild for $Arch-based Systems",
+    # Keep the previous broad pattern as a compatibility fallback for catalog indexing variations.
+    "$OsName Build $OsBuild"
+  )
+
+  if ($versionLabel) {
+    $searchAttempts += @(
+      "$versionLabel for $Arch-based Systems",
+      "$versionLabel $OsBuild for $Arch-based Systems",
+      "$versionLabel Cumulative Update"
+    )
   }
-  return $res
+
+  foreach ($query in $searchAttempts) {
+    Assert-NotCancelled
+    Write-Verbose ("Catalog query attempt: {0}" -f $query)
+
+    try {
+      $res = @(Get-MSCatalogUpdate -Search $query -Architecture $Arch -IncludeDynamic -AllPages)
+    } catch {
+      $res = @()
+    }
+
+    Write-Verbose ("Catalog query result count for '{0}': {1}" -f $query, $res.Count)
+    if ($res.Count -gt 0) {
+      Write-Host ("Catalog broad search matched query: {0}" -f $query) -ForegroundColor Cyan
+      return $res
+    }
+  }
+
+  return @()
 }
 
 function Select-LatestByCategoryPreferMonth {
