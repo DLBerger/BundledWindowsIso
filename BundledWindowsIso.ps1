@@ -1184,7 +1184,8 @@ function Get-CatalogCandidatesBroad {
   $versionLabel = Get-CatalogVersionLabelFromBuild -OsName $OsName -OsBuild $OsBuild
 
   $searchAttempts = @(
-    "$OsName $OsBuild for $Arch-based Systems"
+    "$OsName $OsBuild for $Arch-based Systems",
+    "$OsName Build $OsBuild"
   )
 
   if ($versionLabel) {
