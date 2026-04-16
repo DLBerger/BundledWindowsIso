@@ -244,6 +244,10 @@ endlocal
   }
   CatalogExcludeTitleTokens = @('preview')
   CatalogDownloadAll        = $true
+  CatalogWindows11VersionBuildMap = @(
+    [pscustomobject]@{ MinBuild = 26200; MaxBuildExclusive = 26300; VersionLabel = 'Windows 11 Version 25H2' }
+    [pscustomobject]@{ MinBuild = 26100; MaxBuildExclusive = 26200; VersionLabel = 'Windows 11 Version 24H2' }
+  )
 
   PreflightCleanupMountPoints = $true
   PreflightUnmountMatchingMountedImages = $true
@@ -1160,10 +1164,7 @@ function Get-CatalogVersionLabelFromBuild {
   if (-not $m.Success) { return $null }
 
   $buildNumber = [int]$m.Groups[1].Value
-  $windows11VersionBuildMap = @(
-    [pscustomobject]@{ MinBuild = 26200; MaxBuildExclusive = 26300; VersionLabel = 'Windows 11 Version 25H2' }
-    [pscustomobject]@{ MinBuild = 26100; MaxBuildExclusive = 26200; VersionLabel = 'Windows 11 Version 24H2' }
-  )
+  $windows11VersionBuildMap = @($Config.CatalogWindows11VersionBuildMap)
 
   foreach ($entry in $windows11VersionBuildMap) {
     if ($buildNumber -ge $entry.MinBuild -and $buildNumber -lt $entry.MaxBuildExclusive) {
