@@ -162,7 +162,7 @@ $script:Name = "BundledWindowsIso.ps1"
 # ==============================
 # git information
 # ==============================
-$GitHash = "02f1908"
+$GitHash = "6b584ff"
 
 # ==============================
 # Script identity
@@ -960,7 +960,6 @@ function Build-InstallWimFromSelection {
   Write-Host ""
 
   $destIndex = 0
-  $firstExport = $true
   foreach ($srcIndex in $SelectedSourceIndices) {
     Assert-NotCancelled
     $destIndex++
@@ -970,21 +969,14 @@ function Build-InstallWimFromSelection {
     Write-Host ("Exporting source index {0} -> destination index {1}" -f $srcIndex, $destIndex) -ForegroundColor Cyan
     Write-Host ("  Name: {0}" -f $srcName) -ForegroundColor Cyan
 
-    $exportArgs = @(
+    $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
       "/Export-Image",
       "/SourceImageFile:$SourceFile",
       "/SourceIndex:$srcIndex",
       "/DestinationImageFile:$dstWim",
       "/Compress:max",
       "/CheckIntegrity"
-    )
-    if (-not $firstExport) {
-      $exportArgs += "/Append"
-    } else {
-      $firstExport = $false
-    }
-
-    $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList $exportArgs -StepName ("Export-Image {0} (src idx {1} -> dst idx {2})" -f $srcName, $srcIndex, $destIndex)
+    ) -StepName ("Export-Image {0} (src idx {1} -> dst idx {2})" -f $srcName, $srcIndex, $destIndex)
 
     if ($rc -ne 0) { Stop-Script "DISM Export-Image failed for SourceIndex $srcIndex (exit $rc)." }
 
@@ -1040,6 +1032,7 @@ function Get-MediaInfoFromInstallWim {
 
   $arch = $null
   $build = $null
+  $servicepack = $null
 
   $out = Invoke-DismRead -Args @("/Get-WimInfo", "/WimFile:$InstallWim", "/Index:1")
   $count = 0
@@ -1053,6 +1046,12 @@ function Get-MediaInfoFromInstallWim {
     if (-not $build -and $line -match '^\s*Version\s*:\s*\d+\.\d+\.(\d+)\s*$') {
       $build = $Matches[1]
     }
+    if (-not $servicepack -and $line -match '^\s*ServicePack Build\s*:\s*(\d+)\s*$') {
+      $servicepack = $Matches[1]
+    }
+  }
+  if ($servicepack) {
+    $build = $build + '.' + $servicepack
   }
 
   if (-not $arch) {
