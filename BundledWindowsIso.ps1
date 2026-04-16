@@ -244,6 +244,7 @@ endlocal
   }
   CatalogExcludeTitleTokens = @('preview')
   CatalogDownloadAll        = $true
+  # Catalog search indexing uses Windows version labels (e.g., 24H2/25H2), not just base build numbers.
   CatalogWindows11VersionBuildMap = @(
     [pscustomobject]@{ MinBuild = 26200; MaxBuildExclusive = 26300; VersionLabel = 'Windows 11 Version 25H2' }
     [pscustomobject]@{ MinBuild = 26100; MaxBuildExclusive = 26200; VersionLabel = 'Windows 11 Version 24H2' }
@@ -1186,6 +1187,7 @@ function Get-CatalogCandidatesBroad {
 
   $searchAttempts = @(
     "$OsName $OsBuild for $Arch-based Systems",
+    # Keep the previous broad pattern as a compatibility fallback for catalog indexing variations.
     "$OsName Build $OsBuild"
   )
 
