@@ -162,7 +162,7 @@ $script:Name = "BundledWindowsIso.ps1"
 # ==============================
 # git information
 # ==============================
-$GitHash = "b29b297"
+$GitHash = "ce2f687"
 
 # ==============================
 # Script identity
@@ -1038,7 +1038,7 @@ function Get-MediaInfoFromInstallWim {
       if ($arch -eq 'amd64') { $arch = 'x64' }
     }
     if (-not $build -and $line -match '^\s*Version\s*:\s*\d+\.\d+\.(\d+)\s*$') {
-      $build = [int]$Matches[1]
+      $build = $Matches[1]
     }
   }
 
@@ -1143,11 +1143,11 @@ function Save-CatalogUpdateAllFiles {
 function Get-CatalogCandidatesBroad {
   param(
     [Parameter(Mandatory=$true)][string]$OsName,
-    [Parameter(Mandatory=$true)][int]$OsBuild,
+    [Parameter(Mandatory=$true)][string]$OsBuild,
     [Parameter(Mandatory=$true)][string]$Arch
   )
 
-  $broad = "$OsName $OsBuild for $Arch-based Systems"
+  $broad = "$OsName Build $OsBuild"
   Write-Host ("Catalog broad search: {0}" -f $broad) -ForegroundColor Cyan
   try {
     $res = @(Get-MSCatalogUpdate -Search $broad -Architecture $Arch -IncludeDynamic -AllPages)
@@ -1216,7 +1216,7 @@ function Initialize-AllMSUsPresent {
   param(
     [Parameter(Mandatory=$true)][string]$IsoFolder,
     [Parameter(Mandatory=$true)][string]$OsName,
-    [Parameter(Mandatory=$true)][int]$OsBuild,
+    [Parameter(Mandatory=$true)][string]$OsBuild,
     [Parameter(Mandatory=$true)][string]$Arch,
     [Parameter(Mandatory=$true)][bool]$ForceDownload
   )
