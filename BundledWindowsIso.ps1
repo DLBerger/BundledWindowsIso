@@ -13,7 +13,6 @@ Dynamic Update (DU) alignment goal:
 DU package acquisition:
 - If DU-related MSU packages are missing next to the ISO (or if -UpdateMSUs is specified), the script uses MSCatalogLTS to search the Microsoft Update Catalog and download the appropriate packages into the same folder as the ISO. MSCatalogLTS provides commands for searching and downloading updates from the Microsoft Update Catalog. [2](https://www.deploymentresearch.com/removing-applications-from-your-windows-11-image-before-and-during-deployment/)[3](https://thedotsource.com/2021/03/16/building-iso-files-with-powershell-7/)
 - The downloaded packages are saved alongside the ISO so they are reusable across runs and can be applied to the staged media.
-- Update packages are selected strictly by the OS build number detected from the ISO (not by release name). This makes the script robust for any new Windows release without requiring code maintenance for version naming.
 - For LCUs: if multiple cumulative updates are found for the detected build, all are downloaded (in oldest-to-newest order) to support checkpoint cumulative update chains; otherwise just the latest is used.
 - For Setup DU, SafeOS DU, SSU, and .NET: the latest applicable package is selected, preferring the same month as the latest LCU.
 
@@ -162,7 +161,7 @@ $script:Name = "BundledWindowsIso.ps1"
 # ==============================
 # git information
 # ==============================
-$GitHash = "6b584ff"
+$GitHash = "652031e"
 
 # ==============================
 # Script identity
@@ -244,11 +243,6 @@ endlocal
   }
   CatalogExcludeTitleTokens = @('preview')
   CatalogDownloadAll        = $true
-  # Catalog search indexing uses Windows version labels (e.g., 24H2/25H2), not just base build numbers.
-  CatalogWindows11VersionBuildMap = @(
-    [pscustomobject]@{ MinBuild = 26200; MaxBuildExclusive = 26300; VersionLabel = 'Windows 11 Version 25H2' }
-    [pscustomobject]@{ MinBuild = 26100; MaxBuildExclusive = 26200; VersionLabel = 'Windows 11 Version 24H2' }
-  )
 
   PreflightCleanupMountPoints = $true
   PreflightUnmountMatchingMountedImages = $true
@@ -287,6 +281,7 @@ $script:State = [ordered]@{
 
   DetectedOS        = $null
   DetectedArch      = $null
+  DetectedVersion   = $null
   DetectedBuild     = $null
 }
 
@@ -362,6 +357,7 @@ function Show-RunBanner {
   Write-Host ("  {0}" -f $script:State.WorkRoot) -ForegroundColor Cyan
   Write-Host "Detected media:" -ForegroundColor Cyan
   Write-Host ("  OS:       {0}" -f $script:State.DetectedOS) -ForegroundColor Cyan
+  if ($script:State.DetectedVersion) { Write-Host ("  Version:  {0}" -f $script:State.DetectedVersion) -ForegroundColor Cyan }
   Write-Host ("  Arch:     {0}" -f $script:State.DetectedArch) -ForegroundColor Cyan
   if ($script:State.DetectedBuild) { Write-Host ("  Build:    {0}" -f $script:State.DetectedBuild) -ForegroundColor Cyan }
   Write-Host ""
@@ -1022,7 +1018,7 @@ function Write-SetupLauncherCmds {
 }
 
 # ==============================
-# Detection (OS, arch, release)
+# Detection (OS, arch, version)
 # ==============================
 function Get-MediaInfoFromInstallWim {
   param([Parameter(Mandatory=$true)][string]$InstallWim)
@@ -1032,6 +1028,7 @@ function Get-MediaInfoFromInstallWim {
 
   $arch = $null
   $build = $null
+  $version = $null
   $servicepack = $null
 
   $out = Invoke-DismRead -Args @("/Get-WimInfo", "/WimFile:$InstallWim", "/Index:1")
@@ -1050,6 +1047,41 @@ function Get-MediaInfoFromInstallWim {
       $servicepack = $Matches[1]
     }
   }
+
+  if ($sampleName -match '(?i)Windows\s+10') {
+    $os = "Windows 10"
+    if (-not $version -and $build) {
+      if ($build -ge 19045) { $version = "22H2" }
+      elseif ($build -eq 19044) { $version = "21H2" }
+      elseif ($build -eq 19043) { $version = "21H1" }
+      elseif ($build -eq 19042) { $version = "20H2" }
+      elseif ($build -eq 19041) { $version = "2004" }
+      elseif ($build -ge 18363) { $version = "1909" }
+      elseif ($build -eq 18362) { $version = "1903" }
+      elseif ($build -ge 17763) { $version = "1809" }
+      elseif ($build -ge 17134) { $version = "1803" }
+      elseif ($build -ge 16299) { $version = "1709" }
+      elseif ($build -ge 15063) { $version = "1703" }
+      elseif ($build -ge 14393) { $version = "1607" }
+      elseif ($build -ge 10586) { $version = "1511" }
+      else { $version = "1507" }
+    }
+  } elseif ($sampleName -match '(?i)Windows\s+11') {
+    $os = "Windows 11"
+    if (-not $version -and $build) {
+      if ($build -ge 28000) { $version = "26H1" }
+      elseif ($build -ge 26200) { $version = "25H2" }
+      elseif ($build -ge 26100) { $version = "24H2" }
+      elseif ($build -ge 22631) { $version = "23H2" }
+      elseif ($build -ge 22621) { $version = "22H2" }
+      else { $version = "21H1" }
+    }
+  } elseif ($sampleName -match '(?i)Windows\s+Server') {
+    $os = "Windows Server"
+  } else {
+    Stop-Script "Windows 10, 11, or Server not found. Cannot proceed."
+  }
+
   if ($servicepack) {
     $build = $build + '.' + $servicepack
   }
@@ -1062,17 +1094,8 @@ function Get-MediaInfoFromInstallWim {
     else { $arch = 'x64' }
   }
 
-  if ($sampleName -match '(?i)Windows\s+11') {
-    $os = "Windows 11"
-  } elseif ($sampleName -match '(?i)Windows\s+10') {
-    $os = "Windows 10"
-  } elseif ($sampleName -match '(?i)Windows\s+8.1') {
-    $os = "Windows 8.1"
-  } else {
-    $os = "Windows"
-  }
-
   $script:State.DetectedOS = $os
+  $script:State.DetectedVersion = $version
   $script:State.DetectedArch = $arch
   $script:State.DetectedBuild = $build
 }
@@ -1152,67 +1175,27 @@ function Save-CatalogUpdateAllFiles {
   }
 }
 
-function Get-CatalogVersionLabelFromBuild {
+function Get-CatalogCandidates {
   param(
     [Parameter(Mandatory=$true)][string]$OsName,
-    [Parameter(Mandatory=$true)][string]$OsBuild
-  )
-
-  if ($OsName -notmatch '(?i)^Windows\s+11\b') { return $null }
-
-  $m = [regex]::Match($OsBuild, '^\s*(\d+)\b')
-  if (-not $m.Success) { return $null }
-
-  $buildNumber = [int]$m.Groups[1].Value
-  $windows11VersionBuildMap = @($Config.CatalogWindows11VersionBuildMap)
-
-  foreach ($entry in $windows11VersionBuildMap) {
-    if ($buildNumber -ge $entry.MinBuild -and $buildNumber -lt $entry.MaxBuildExclusive) {
-      return $entry.VersionLabel
-    }
-  }
-
-  return $null
-}
-
-function Get-CatalogCandidatesBroad {
-  param(
-    [Parameter(Mandatory=$true)][string]$OsName,
-    [Parameter(Mandatory=$true)][string]$OsBuild,
+    [Parameter(Mandatory=$true)][string]$OsVersion,
     [Parameter(Mandatory=$true)][string]$Arch
   )
 
-  $versionLabel = Get-CatalogVersionLabelFromBuild -OsName $OsName -OsBuild $OsBuild
+  Assert-NotCancelled
+  $query = "-OperatingSystem $OsName -Version $OsVersion -Architecture $Arch -IncludeDynamic -AllPages"
+  Write-Verbose ("Catalog query attempt: $query")
 
-  $searchAttempts = @(
-    "$OsName $OsBuild for $Arch-based Systems",
-    # Keep the previous broad pattern as a compatibility fallback for catalog indexing variations.
-    "$OsName Build $OsBuild"
-  )
-
-  if ($versionLabel) {
-    $searchAttempts += @(
-      "$versionLabel for $Arch-based Systems",
-      "$versionLabel $OsBuild for $Arch-based Systems",
-      "$versionLabel Cumulative Update"
-    )
+  try {
+    $res = @(Get-MSCatalogUpdate $query)
+  } catch {
+    $res = @()
   }
 
-  foreach ($query in $searchAttempts) {
-    Assert-NotCancelled
-    Write-Verbose ("Catalog query attempt: {0}" -f $query)
-
-    try {
-      $res = @(Get-MSCatalogUpdate -Search $query -Architecture $Arch -IncludeDynamic -AllPages)
-    } catch {
-      $res = @()
-    }
-
-    Write-Verbose ("Catalog query result count for '{0}': {1}" -f $query, $res.Count)
-    if ($res.Count -gt 0) {
-      Write-Host ("Catalog broad search matched query: {0}" -f $query) -ForegroundColor Cyan
-      return $res
-    }
+  Write-Verbose ("Catalog query result count for '{0}': {1}" -f $query, $res.Count)
+  if ($res.Count -gt 0) {
+    Write-Host ("Catalog search matched query: {0}" -f $query) -ForegroundColor Cyan
+    return $res
   }
 
   return @()
@@ -1277,6 +1260,7 @@ function Initialize-AllMSUsPresent {
   param(
     [Parameter(Mandatory=$true)][string]$IsoFolder,
     [Parameter(Mandatory=$true)][string]$OsName,
+    [Parameter(Mandatory=$true)][string]$OsVersion,
     [Parameter(Mandatory=$true)][string]$OsBuild,
     [Parameter(Mandatory=$true)][string]$Arch,
     [Parameter(Mandatory=$true)][bool]$ForceDownload
@@ -1292,13 +1276,13 @@ function Initialize-AllMSUsPresent {
     return [pscustomobject]@{ Selected=[ordered]@{}; Downloaded=@() }
   }
 
-  $results = Get-CatalogCandidatesBroad -OsName $OsName -OsBuild $OsBuild -Arch $Arch
+  $results = Get-CatalogCandidates -OsName $OsName -OsVersion $OsVersion -Arch $Arch
   if ($results.Count -lt 1) {
-    Write-Host "Catalog broad search returned no results for $OsName build $OsBuild, $Arch."
+    Write-Host "Catalog search returned no results for $OsName $OsVersion, $Arch."
      return [pscustomobject]@{}
   }
 
-  Write-Host ("Search completed for broad query; found {0} updates" -f $results.Count) -ForegroundColor Cyan
+  Write-Host ("Search completed: found {0} updates" -f $results.Count) -ForegroundColor Cyan
   Write-Host ""
   if ($VerbosePreference -eq 'Continue') {
     foreach ($r in $results) { Write-Host ("  {0}" -f $r.Title) -ForegroundColor Cyan }
@@ -1313,7 +1297,7 @@ function Initialize-AllMSUsPresent {
   # is used when only one is found (no checkpoint chain required).
   $lcuAll = @(Get-AllByCategoryFiltered -Results $results -Category 'LCU')
   if ($lcuAll.Count -lt 1) {
-     Write-Host "Could not find any catalog entries for LCU ($OsName build $OsBuild $Arch) using broad search."
+     Write-Host "Could not find any catalog entries for LCU ($OsName $OsVersion $Arch)."
      return [pscustomobject]@{}
   }
 
@@ -2088,12 +2072,13 @@ try {
     if ($force) { Write-Host "[UpdateMSUs/CleanMSUs] Forcing update download/refresh..." -ForegroundColor Yellow }
     else { Write-Host "Ensuring updates exist next to ISO (download if missing)..." -ForegroundColor Yellow }
 
-    if (-not $script:State.DetectedBuild) {
-      Stop-Script "Could not detect OS build number from ISO. Cannot query update catalog."
+    if (-not $script:State.DetectedVersion) {
+      Stop-Script "Could not detect OS version from ISO. Cannot query update catalog."
     }
 
-    $catalogInfo = Initialize-AllMSUsPresent -IsoFolder $isoDir -OsName $script:State.DetectedOS -OsBuild $script:State.DetectedBuild -Arch $script:State.DetectedArch -ForceDownload $force
+    $catalogInfo = Initialize-AllMSUsPresent -IsoFolder $isoDir -OsName $script:State.DetectedOS -OsVersion $script:State.DetectedVersion -OsBuild $script:State.DetectedBuild -Arch $script:State.DetectedArch -ForceDownload $force
   }
+Stop-Script "Done for now"
 
   $localUpdates = @(Get-ChildItem -LiteralPath $isoDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.msu','.cab') })
   if ($localUpdates.Count -gt 0) {
