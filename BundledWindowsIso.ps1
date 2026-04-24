@@ -11,8 +11,8 @@ Dynamic Update (DU) alignment goal:
 - This script aims to pre-stage those DU packages into the media so the resulting ISO behaves like a current, self-contained installation source with minimal additional downloads at install/upgrade time. [1](https://learn.microsoft.com/en-us/windows/deployment/update/media-dynamic-update)
 
 DU package acquisition:
-- If DU-related MSU packages are missing next to the ISO (or if -UpdateMSUs is specified), the script uses MSCatalogLTS to search the Microsoft Update Catalog and download the appropriate packages into the same folder as the ISO. MSCatalogLTS provides commands for searching and downloading updates from the Microsoft Update Catalog. [2](https://www.deploymentresearch.com/removing-applications-from-your-windows-11-image-before-and-during-deployment/)[3](https://thedotsource.com/2021/03/16/building-iso-files-with-powershell-7/)
-- The downloaded packages are saved alongside the ISO so they are reusable across runs and can be applied to the staged media.
+- If DU-related MSU packages are missing (or if -UpdateMSUs is specified), the script uses MSCatalogLTS to search the Microsoft Update Catalog and download the appropriate packages into a `msus\<category>` directory tree located in the same folder as the source ISO. MSCatalogLTS provides commands for searching and downloading updates from the Microsoft Update Catalog. [2](https://www.deploymentresearch.com/removing-applications-from-your-windows-11-image-before-and-during-deployment/)[3](https://thedotsource.com/2021/03/16/building-iso-files-with-powershell-7/)
+- The downloaded packages are saved in `<isoDir>\msus\<category>\` (e.g., msus\LCU\, msus\SetupDU\, msus\SafeOS\, msus\SSU\, msus\DotNet\) so they are reusable across runs and can be applied to the staged media.
 - For LCUs: if multiple cumulative updates are found for the detected build, all are downloaded (in oldest-to-newest order) to support checkpoint cumulative update chains; otherwise just the latest is used.
 - For Setup DU, SafeOS DU, SSU, and .NET: the latest applicable package is selected, preferring the same month as the latest LCU.
 
@@ -64,8 +64,16 @@ UpdateISO behavior:
 - To force rebuild (and subsequent servicing/refresh), explicitly specify indices (for example: -Pro or -Indices 6,8,10).
 
 UpdateMSUs behavior:
-- -UpdateMSUs forces the DU/MSU download logic via MSCatalogLTS, even if MSU files already exist alongside the ISO. [2](https://www.deploymentresearch.com/removing-applications-from-your-windows-11-image-before-and-during-deployment/)[3](https://thedotsource.com/2021/03/16/building-iso-files-with-powershell-7/)
-- Without -UpdateMSUs, download occurs only when DU/MSU packages are missing (none present alongside the ISO).
+- -UpdateMSUs forces the DU/MSU download logic via MSCatalogLTS, even if MSU files already exist in the msus subdirectory. [2](https://www.deploymentresearch.com/removing-applications-from-your-windows-11-image-before-and-during-deployment/)[3](https://thedotsource.com/2021/03/16/building-iso-files-with-powershell-7/)
+- Without -UpdateMSUs, download occurs only when DU/MSU packages are missing (none present in the msus subdirectory alongside the ISO).
+
+MSU directory layout:
+- MSU/CAB packages are downloaded into <isoDir>\msus\<category>\ subdirectories.
+- Category subdirectories: LCU, SetupDU, SafeOS, SSU, DotNet.
+- Application targets per category:
+  - install.wim (each index): SSU (prerequisites) -> LCU (checkpoint chain) -> DotNet
+  - winre.wim (inside install.wim): SSU -> SafeOS DU
+  - boot.wim (all WinPE indices): SSU -> SafeOS DU -> Setup DU
 
 DryRun behavior:
 - With -DryRun, the script completes PREP actions needed to stage the work tree and then prints what would happen for post-PREP actions.
@@ -161,7 +169,7 @@ $script:Name = "BundledWindowsIso.ps1"
 # ==============================
 # git information
 # ==============================
-$GitHash = "680b2dd"
+$GitHash = "0418adc"
 
 # ==============================
 # Script identity
@@ -233,6 +241,8 @@ echo.
 "%SRC%setup.exe" /auto clean /eula accept /configfile "%SRC%{0}"
 endlocal
 '@
+
+  MsusSubdirName            = 'msus'
 
   CatalogCategoryMatchers = [ordered]@{
     LCU     = '(?i)\bCumulative Update\b'
@@ -1149,17 +1159,12 @@ function Get-LocalMsuFiles([string]$FolderPath) {
 }
 
 function Clear-MsuFolder([string]$FolderPath) {
-  $msus = Get-LocalMsuFiles -FolderPath $FolderPath
-  if ($msus.Count -lt 1) { return }
-  Write-Host ("[CleanMSUs] Deleting {0} existing MSU(s) in {1}" -f $msus.Count, $FolderPath) -ForegroundColor Yellow
-  foreach ($f in $msus) {
-    try { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue } catch {}
-  }
-  # also delete CABs (dynamic updates) that we may have downloaded
-  $cabs = @(Get-ChildItem -LiteralPath $FolderPath -Filter "*.cab" -File -ErrorAction SilentlyContinue)
-  foreach ($c in $cabs) {
-    try { Remove-Item -LiteralPath $c.FullName -Force -ErrorAction SilentlyContinue } catch {}
-  }
+  $msuRoot = Join-Path $FolderPath $Config.MsusSubdirName
+  if (-not (Test-Path $msuRoot)) { return }
+  $existing = @(Get-ChildItem -LiteralPath $msuRoot -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.msu','.cab') })
+  if ($existing.Count -lt 1) { return }
+  Write-Host ("[CleanMSUs] Removing msus directory ({0} file(s)) in {1}" -f $existing.Count, $msuRoot) -ForegroundColor Yellow
+  try { Remove-Item -Path $msuRoot -Recurse -Force -ErrorAction SilentlyContinue } catch {}
 }
 
 function Save-CatalogUpdateAllFiles {
@@ -1268,11 +1273,15 @@ function Initialize-AllMSUsPresent {
 
   Initialize-MSCatalogLTS
 
-  $existing = @(Get-ChildItem -LiteralPath $IsoFolder -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.msu','.cab') })
+  $msuRoot = Join-Path $IsoFolder $Config.MsusSubdirName
+  $existing = @()
+  if (Test-Path $msuRoot) {
+    $existing = @(Get-ChildItem -LiteralPath $msuRoot -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.msu','.cab') })
+  }
   $needDownload = $ForceDownload -or ($existing.Count -lt 1)
 
   if (-not $needDownload) {
-    Write-Verbose ("Updates already present in ISO folder ({0}); skipping download. Use -UpdateMSUs or -CleanMSUs to refresh." -f $existing.Count)
+    Write-Verbose ("Updates already present in {0} ({1} file(s)); skipping download. Use -UpdateMSUs or -CleanMSUs to refresh." -f $msuRoot, $existing.Count)
     return [pscustomobject]@{ Selected=[ordered]@{}; Downloaded=@() }
   }
 
@@ -1329,7 +1338,10 @@ function Initialize-AllMSUsPresent {
     }
   }
 
-  $before = @(Get-ChildItem -LiteralPath $IsoFolder -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+  $before = @()
+  if (Test-Path $msuRoot) {
+    $before = @(Get-ChildItem -LiteralPath $msuRoot -Recurse -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+  }
 
   if ($VerbosePreference -eq 'Continue') {
     foreach ($c in $selected.Keys) {
@@ -1338,21 +1350,25 @@ function Initialize-AllMSUsPresent {
     Write-Host ""
   }
 
-  Write-Host "Downloading updates to ISO folder..." -ForegroundColor Cyan
+  Write-Host ("Downloading updates to: {0}" -f $msuRoot) -ForegroundColor Cyan
   foreach ($cat in $selected.Keys) {
+    $catDir = Join-Path $msuRoot $cat
+    if (-not (Test-Path $catDir)) {
+      New-Item -ItemType Directory -Path $catDir -Force | Out-Null
+    }
     foreach ($entry in $selected[$cat]) {
       Assert-NotCancelled
       $t = $entry.Title
       Write-Host ("Downloading ({0}): {1}" -f $cat, $t) -ForegroundColor Cyan
       try {
-        Save-CatalogUpdateAllFiles -CatalogItem $entry.Item -DestinationFolder $IsoFolder
+        Save-CatalogUpdateAllFiles -CatalogItem $entry.Item -DestinationFolder $catDir
       } catch {
         Stop-Script "Download failed for '$t': $($_.Exception.Message)"
       }
     }
   }
 
-  $after = @(Get-ChildItem -LiteralPath $IsoFolder -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+  $after = @(Get-ChildItem -LiteralPath $msuRoot -Recurse -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
   $downloaded = @($after | Where-Object { $before -notcontains $_ })
 
   return [pscustomobject]@{ Selected=$selected; Downloaded=$downloaded }
@@ -1379,90 +1395,105 @@ function Get-ArchFromPath([string]$p) {
 }
 
 # ==============================
-# DU folder preparation (copy both MSU and CAB where relevant)
+# DU folder preparation (organize by category and KB number)
 # ==============================
 function Initialize-DUFolders {
   param(
     [Parameter(Mandatory=$true)][string]$DuRoot,
-    [Parameter(Mandatory=$true)][string]$IsoFolder,
-    [Parameter(Mandatory=$true)][object]$CatalogInfo
+    [Parameter(Mandatory=$true)][string]$IsoFolder
   )
 
-  # Validate that MSU files exist next to ISO
-  $all = @(Get-ChildItem -LiteralPath $IsoFolder -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.msu','.cab') })
-  $allPaths = @($all | Select-Object -ExpandProperty FullName)
-  if ($allPaths.Count -lt 1) {
-    Stop-Script "No MSU/CAB files found in ISO folder: $IsoFolder. MSUs must be present to proceed."
+  $msuRoot = Join-Path $IsoFolder $Config.MsusSubdirName
+
+  # Validate that MSU files exist in the msus subdirectory
+  $all = @(Get-ChildItem -LiteralPath $msuRoot -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.msu','.cab') })
+  if ($all.Count -lt 1) {
+    Stop-Script "No MSU/CAB files found in msus folder: $msuRoot. MSUs must be present to proceed."
   }
 
-  # Clean and recreate DU root (removes stale KB folders)
+  # Clean and recreate DU root (removes stale category/KB folders)
   Write-Verbose "Cleaning DU root structure: $DuRoot"
   if (Test-Path $DuRoot) {
     try { Remove-Item -Path $DuRoot -Recurse -Force -ErrorAction SilentlyContinue } catch {}
   }
   New-Folder $DuRoot
 
-  # Extract KB numbers from each MSU/CAB file and organize into KB-named folders
-  # Filter by detected architecture
-  Write-Verbose "Organizing MSU/CAB files by KB number into: $DuRoot (filtering for $($script:State.DetectedArch))"
-  $kbMap = @{}
-  foreach ($f in $allPaths) {
-    $kb = Get-KbNumberFromPath -p $f
-    if ($kb -eq [int]::MaxValue) {
-      Write-Host ("WARNING: Could not extract KB number from {0}; skipping." -f (Split-Path -Leaf $f)) -ForegroundColor Yellow
+  # Process each category subdirectory under msus\
+  # Returns a pscustomobject with one ordered hashtable per category:
+  #   each hashtable maps "KB#####" -> folder path under $DuRoot\<category>\KB#####\
+  $duFolders = [pscustomobject]@{
+    LCU     = [ordered]@{}
+    SetupDU = [ordered]@{}
+    SafeOS  = [ordered]@{}
+    SSU     = [ordered]@{}
+    DotNet  = [ordered]@{}
+  }
+
+  $totalFiles = 0
+  $totalKbs = 0
+  foreach ($cat in @('LCU','SetupDU','SafeOS','SSU','DotNet')) {
+    $catSrcDir = Join-Path $msuRoot $cat
+    if (-not (Test-Path $catSrcDir)) {
+      Write-Verbose ("No {0} directory found under {1}; skipping." -f $cat, $msuRoot)
       continue
     }
-    
-    # Filter by detected architecture
-    $fileArch = Get-ArchFromPath -p $f
-    if ($fileArch -and $fileArch -ne $script:State.DetectedArch) {
-      Write-Verbose ("Skipping {0} (arch {1} does not match detected {2})" -f (Split-Path -Leaf $f), $fileArch, $script:State.DetectedArch)
+
+    $catFiles = @(Get-ChildItem -LiteralPath $catSrcDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.msu','.cab') })
+    if ($catFiles.Count -lt 1) {
+      Write-Verbose ("No MSU/CAB files found in {0}; skipping." -f $catSrcDir)
       continue
     }
-    
-    # Group files by KB
-    if (-not $kbMap.ContainsKey($kb)) { $kbMap[$kb] = @() }
-    $kbMap[$kb] += $f
-  }
 
-  if ($kbMap.Count -lt 1) {
-    $archMsg = "Architecture filter removed all MSU files (detected: $($script:State.DetectedArch))"
-    Write-Host "WARNING: $archMsg" -ForegroundColor Yellow
-    Write-Host "Available MSU files:" -ForegroundColor Yellow
-    foreach ($f in $allPaths) {
-      $arch = Get-ArchFromPath -p $f
-      Write-Host ("  {0} (arch: {1})" -f (Split-Path -Leaf $f), ($arch -or "unknown")) -ForegroundColor Yellow
+    $catDuDir = Join-Path $DuRoot $cat
+    New-Folder $catDuDir
+
+    # Group files by KB number, filtering by detected architecture
+    $kbMap = @{}
+    foreach ($f in $catFiles) {
+      $kb = Get-KbNumberFromPath -p $f.FullName
+      if ($kb -eq [int]::MaxValue) {
+        Write-Host ("WARNING: Could not extract KB number from {0}; skipping." -f $f.Name) -ForegroundColor Yellow
+        continue
+      }
+
+      $fileArch = Get-ArchFromPath -p $f.FullName
+      if ($fileArch -and $fileArch -ne $script:State.DetectedArch) {
+        Write-Verbose ("Skipping {0} (arch {1} does not match detected {2})" -f $f.Name, $fileArch, $script:State.DetectedArch)
+        continue
+      }
+
+      if (-not $kbMap.ContainsKey($kb)) { $kbMap[$kb] = @() }
+      $kbMap[$kb] += $f.FullName
     }
-    Stop-Script "No valid MSU/CAB files found after filtering. Check architecture match."
-  }
 
-  Write-Verbose "KB map contains: $($kbMap.Count) entries"
-  Write-Verbose "KB numbers: $($kbMap.Keys -join ', ')"
-  
-  # Create KB-numbered folders and copy files
-  Write-Verbose "Creating KB-numbered folders under DU root"
-  $kbFolders = [ordered]@{}
-  $sortedKbs = @($kbMap.Keys | Sort-Object { [int]$_ })
-  Write-Verbose "Sorted KB numbers: $($sortedKbs -join ', ')"
-  
-  foreach ($kb in $sortedKbs) {
-    $kb = [int]$kb  # Ensure $kb is an integer, not string
-    $kbKey = "KB$kb"  # Use string key to avoid hashtable index limits
-    Write-Verbose "Processing $kbKey"
-    $kbFolder = Join-Path $DuRoot $kbKey
-    New-Folder $kbFolder
-    
-    $kbFolders[$kbKey] = $kbFolder
-
-    foreach ($f in $kbMap[$kb]) {
-      $fname = Split-Path -Leaf $f
-      Copy-Item -Path $f -Destination (Join-Path $kbFolder $fname) -Force
-      Write-Verbose ("  Copied {0} -> {1}" -f $fname, $kbKey)
+    if ($kbMap.Count -lt 1) {
+      Write-Host ("WARNING: Architecture filter removed all {0} files (detected: {1})" -f $cat, $script:State.DetectedArch) -ForegroundColor Yellow
+      continue
     }
+
+    # Create KB-numbered folders under DuRoot\<category>\ and copy files
+    $sortedKbs = @($kbMap.Keys | Sort-Object { [int]$_ })
+    foreach ($kb in $sortedKbs) {
+      $kbKey = "KB$([int]$kb)"
+      $kbFolder = Join-Path $catDuDir $kbKey
+      New-Folder $kbFolder
+      $duFolders.$cat[$kbKey] = $kbFolder
+      foreach ($f in $kbMap[$kb]) {
+        $fname = Split-Path -Leaf $f
+        Copy-Item -Path $f -Destination (Join-Path $kbFolder $fname) -Force
+        Write-Verbose ("  Copied {0} -> {1}\{2}" -f $fname, $cat, $kbKey)
+        $totalFiles++
+      }
+      $totalKbs++
+    }
+
+    Write-Verbose ("Category {0}: {1} KB folder(s)" -f $cat, $duFolders.$cat.Count)
   }
 
-  Write-Host ("Organized {0} MSU/CAB files into {1} KB-numbered folders." -f $allPaths.Count, $kbFolders.Count) -ForegroundColor Cyan
-  return $kbFolders
+  Write-Host ("Organized {0} MSU/CAB file(s) into {1} KB folder(s) across categories (LCU:{2}, SetupDU:{3}, SafeOS:{4}, SSU:{5}, DotNet:{6})." -f `
+    $totalFiles, $totalKbs, `
+    $duFolders.LCU.Count, $duFolders.SetupDU.Count, $duFolders.SafeOS.Count, $duFolders.SSU.Count, $duFolders.DotNet.Count) -ForegroundColor Cyan
+  return $duFolders
 }
 
 # ==============================
@@ -1543,7 +1574,7 @@ function Update-WinREInsideMountedOS {
     [Parameter(Mandatory=$true)][string]$OsMountDir,
     [Parameter(Mandatory=$true)][string]$OsName,
     [Parameter(Mandatory=$true)][int]$OsIndex,
-    [Parameter(Mandatory=$true)][hashtable]$KbFolders,
+    [Parameter(Mandatory=$true)][object]$DuFolders,
     [Parameter(Mandatory=$true)][string]$ScratchRoot,
     [Parameter(Mandatory=$true)][string]$LogsRoot
   )
@@ -1583,9 +1614,15 @@ function Update-WinREInsideMountedOS {
   }
 
   try {
-    # Service WinRE with all KB packages in order
-    $cuBase = Join-Path $LogsRoot ("dism_addpackage_winre_cu_{0}_idx{1}.log" -f $nameTag, $OsIndex)
-    Add-CuPackagesOrdered -MountDir $mDir -KbFolders $KbFolders -ScratchRoot $ScratchRoot -LogBasePath $cuBase -ContextLabel ("WinRE {0}" -f $OsName)
+    # WinRE targets: SSU (prerequisites) -> SafeOS DU
+    if ($DuFolders.SSU.Count -gt 0) {
+      $ssuBase = Join-Path $LogsRoot ("dism_addpackage_winre_ssu_{0}_idx{1}.log" -f $nameTag, $OsIndex)
+      Add-CuPackagesOrdered -MountDir $mDir -KbFolders $DuFolders.SSU -ScratchRoot $ScratchRoot -LogBasePath $ssuBase -ContextLabel ("WinRE {0} SSU" -f $OsName)
+    }
+    if ($DuFolders.SafeOS.Count -gt 0) {
+      $safeOsBase = Join-Path $LogsRoot ("dism_addpackage_winre_safeos_{0}_idx{1}.log" -f $nameTag, $OsIndex)
+      Add-CuPackagesOrdered -MountDir $mDir -KbFolders $DuFolders.SafeOS -ScratchRoot $ScratchRoot -LogBasePath $safeOsBase -ContextLabel ("WinRE {0} SafeOS" -f $OsName)
+    }
   }
   finally {
     Write-Verbose ("Unmount and commit WinRE for {0} (index {1})" -f $OsName, $OsIndex)
@@ -1609,7 +1646,7 @@ function Update-InstallWimIndex {
     [string]$WimPath,
     [int]$Index,
     [string]$IndexName,
-    [hashtable]$KbFolders,
+    [object]$DuFolders,
     [string]$MountRoot,
     [string]$LogsRoot,
     [string]$ScratchRoot
@@ -1645,12 +1682,22 @@ function Update-InstallWimIndex {
   }
 
   try {
-    # Apply all KB packages in numeric order to this OS image
-    $cuBase = Join-Path $LogsRoot ("dism_addpackage_os_{0}_idx{1}.log" -f $nameTag, $Index)
-    Add-CuPackagesOrdered -MountDir $mountDir -KbFolders $KbFolders -ScratchRoot $ScratchRoot -LogBasePath $cuBase -ContextLabel ("OS {0}" -f $IndexName)
+    # install.wim targets: SSU (prerequisites) -> LCU (checkpoint chain, KB order) -> DotNet
+    if ($DuFolders.SSU.Count -gt 0) {
+      $ssuBase = Join-Path $LogsRoot ("dism_addpackage_os_{0}_idx{1}_ssu.log" -f $nameTag, $Index)
+      Add-CuPackagesOrdered -MountDir $mountDir -KbFolders $DuFolders.SSU -ScratchRoot $ScratchRoot -LogBasePath $ssuBase -ContextLabel ("OS {0} SSU" -f $IndexName)
+    }
+    if ($DuFolders.LCU.Count -gt 0) {
+      $lcuBase = Join-Path $LogsRoot ("dism_addpackage_os_{0}_idx{1}_lcu.log" -f $nameTag, $Index)
+      Add-CuPackagesOrdered -MountDir $mountDir -KbFolders $DuFolders.LCU -ScratchRoot $ScratchRoot -LogBasePath $lcuBase -ContextLabel ("OS {0} LCU" -f $IndexName)
+    }
+    if ($DuFolders.DotNet.Count -gt 0) {
+      $dotNetBase = Join-Path $LogsRoot ("dism_addpackage_os_{0}_idx{1}_dotnet.log" -f $nameTag, $Index)
+      Add-CuPackagesOrdered -MountDir $mountDir -KbFolders $DuFolders.DotNet -ScratchRoot $ScratchRoot -LogBasePath $dotNetBase -ContextLabel ("OS {0} DotNet" -f $IndexName)
+    }
 
     # Service WinRE inside this OS image (if it exists)
-    Update-WinREInsideMountedOS -OsMountDir $mountDir -OsName $IndexName -OsIndex $Index -KbFolders $KbFolders -ScratchRoot $ScratchRoot -LogsRoot $LogsRoot
+    Update-WinREInsideMountedOS -OsMountDir $mountDir -OsName $IndexName -OsIndex $Index -DuFolders $DuFolders -ScratchRoot $ScratchRoot -LogsRoot $LogsRoot
   }
   finally {
     Write-Verbose ("Unmount and commit OS image: {0} (index {1})" -f $IndexName, $Index)
@@ -1667,7 +1714,7 @@ function Update-InstallWimIndex {
 function Update-BootWim {
   param(
     [Parameter(Mandatory=$true)][string]$BootWimPath,
-    [Parameter(Mandatory=$true)][hashtable]$KbFolders,
+    [Parameter(Mandatory=$true)][object]$DuFolders,
     [string]$MountRoot,
     [string]$LogsRoot,
     [string]$ScratchRoot
@@ -1711,9 +1758,19 @@ function Update-BootWim {
     }
 
     try {
-      # Apply all KB packages in numeric order to WinPE
-      $cuBase = Join-Path $LogsRoot ("dism_addpackage_boot_{0}_idx{1}.log" -f $nameTag, $idx)
-      Add-CuPackagesOrdered -MountDir $mountDir -KbFolders $KbFolders -ScratchRoot $ScratchRoot -LogBasePath $cuBase -ContextLabel ("boot.wim {0}" -f $nm)
+      # boot.wim targets: SSU (prerequisites) -> SafeOS DU (WinRE/recovery) -> Setup DU (setup binaries)
+      if ($DuFolders.SSU.Count -gt 0) {
+        $ssuBase = Join-Path $LogsRoot ("dism_addpackage_boot_ssu_{0}_idx{1}.log" -f $nameTag, $idx)
+        Add-CuPackagesOrdered -MountDir $mountDir -KbFolders $DuFolders.SSU -ScratchRoot $ScratchRoot -LogBasePath $ssuBase -ContextLabel ("boot.wim {0} SSU" -f $nm)
+      }
+      if ($DuFolders.SafeOS.Count -gt 0) {
+        $safeOsBase = Join-Path $LogsRoot ("dism_addpackage_boot_safeos_{0}_idx{1}.log" -f $nameTag, $idx)
+        Add-CuPackagesOrdered -MountDir $mountDir -KbFolders $DuFolders.SafeOS -ScratchRoot $ScratchRoot -LogBasePath $safeOsBase -ContextLabel ("boot.wim {0} SafeOS" -f $nm)
+      }
+      if ($DuFolders.SetupDU.Count -gt 0) {
+        $setupDuBase = Join-Path $LogsRoot ("dism_addpackage_boot_setupdu_{0}_idx{1}.log" -f $nameTag, $idx)
+        Add-CuPackagesOrdered -MountDir $mountDir -KbFolders $DuFolders.SetupDU -ScratchRoot $ScratchRoot -LogBasePath $setupDuBase -ContextLabel ("boot.wim {0} SetupDU" -f $nm)
+      }
     }
     finally {
       Write-Verbose ("Unmount and commit boot.wim: {0} (index {1})" -f $nm, $idx)
@@ -1890,6 +1947,7 @@ try {
     $script:State.StashedInstallWim = $meta["StashedInstallWim"]
     $script:State.OutputIsoPath = $meta["OutputIsoPath"]
     $script:State.MetaPath = $metaFiles[0].FullName
+    $isoDir = Split-Path -Parent $script:State.IsoPath
   }
 
   if ($DestIsoPath) {
@@ -2070,7 +2128,7 @@ try {
   if ($doDownload) {
     $force = [bool]$UpdateMSUs -or [bool]$CleanMSUs
     if ($force) { Write-Host "[UpdateMSUs/CleanMSUs] Forcing update download/refresh..." -ForegroundColor Yellow }
-    else { Write-Host "Ensuring updates exist next to ISO (download if missing)..." -ForegroundColor Yellow }
+    else { Write-Host "Ensuring updates exist in msus directory (download if missing)..." -ForegroundColor Yellow }
 
     if (-not $script:State.DetectedVersion) {
       Stop-Script "Could not detect OS version from ISO. Cannot query update catalog."
@@ -2078,13 +2136,13 @@ try {
 
     $catalogInfo = Initialize-AllMSUsPresent -IsoFolder $isoDir -OsName $script:State.DetectedOS -OsVersion $script:State.DetectedVersion -OsBuild $script:State.DetectedBuild -Arch $script:State.DetectedArch -ForceDownload $force
   }
-Stop-Script "Done for now"
 
-  $localUpdates = @(Get-ChildItem -LiteralPath $isoDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.msu','.cab') })
+  $msuRootPath = Join-Path $isoDir $Config.MsusSubdirName
+  $localUpdates = @(Get-ChildItem -LiteralPath $msuRootPath -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.msu','.cab') })
   if ($localUpdates.Count -gt 0) {
-    # Organize MSU/CAB files into KB-numbered folders under DU/
-    # Returns hashtable of @{ [KB number] = [KB folder path] }
-    $kbFolders = Initialize-DUFolders -DuRoot $script:State.DuRoot -IsoFolder $isoDir -CatalogInfo $catalogInfo
+    # Organize MSU/CAB files from msus\<category>\ into DuRoot\<category>\KB####\ folders.
+    # Returns a pscustomobject with per-category ordered KB folder maps.
+    $duFolders = Initialize-DUFolders -DuRoot $script:State.DuRoot -IsoFolder $isoDir
 
     # Preflight: cleanup DISM mount state before servicing
     $bootWim = Join-Path $isoSources 'boot.wim'
@@ -2092,7 +2150,7 @@ Stop-Script "Done for now"
     if (Test-Path $bootWim) { $relevant += $bootWim }
     Clear-PreflightDismMounts -RelevantImageFiles $relevant -RelevantMountRoot $script:State.MountRoot
 
-    # Service install.wim indices: mount each index, apply all KB packages in numeric order
+    # Service install.wim indices: SSU -> LCU -> DotNet (per index); WinRE inside each index: SSU -> SafeOS
     Write-Verbose "Starting install.wim servicing"
     $rebuiltPairs = Get-WimPairs -InstallPath $wimToService
     $rebuiltNameMap = Get-IndexNameMap -Pairs $rebuiltPairs
@@ -2102,14 +2160,14 @@ Stop-Script "Done for now"
     foreach ($idx in $serviceIndexes) {
       Assert-NotCancelled
       $nm = $rebuiltNameMap[[int]$idx]; if (-not $nm) { $nm = "<unknown>" }
-      Update-InstallWimIndex -WimPath $wimToService -Index $idx -IndexName $nm -KbFolders $kbFolders -MountRoot $script:State.MountRoot -LogsRoot $script:State.LogsRoot -ScratchRoot $script:State.ScratchRoot
+      Update-InstallWimIndex -WimPath $wimToService -Index $idx -IndexName $nm -DuFolders $duFolders -MountRoot $script:State.MountRoot -LogsRoot $script:State.LogsRoot -ScratchRoot $script:State.ScratchRoot
     }
 
-    # Service boot.wim (WinPE/Setup) with all KB packages in numeric order
+    # Service boot.wim (WinPE/Setup): SSU -> SafeOS DU -> Setup DU
     if (Test-Path $bootWim) {
       Write-Verbose "Starting boot.wim servicing"
       Write-Host "Servicing boot.wim (WinPE)..." -ForegroundColor Cyan
-      Update-BootWim -BootWimPath $bootWim -KbFolders $kbFolders -MountRoot $script:State.MountRoot -LogsRoot $script:State.LogsRoot -ScratchRoot $script:State.ScratchRoot
+      Update-BootWim -BootWimPath $bootWim -DuFolders $duFolders -MountRoot $script:State.MountRoot -LogsRoot $script:State.LogsRoot -ScratchRoot $script:State.ScratchRoot
     } else {
       Write-Host "WARNING: ISO\sources\boot.wim not found; skipping WinPE/Setup servicing." -ForegroundColor Yellow
     }
