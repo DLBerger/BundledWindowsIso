@@ -12,7 +12,7 @@ Dynamic Update (DU) alignment goal:
 
 DU package acquisition:
 - If DU-related MSU packages are missing (or if -UpdateMSUs is specified), the script uses MSCatalogLTS to search the Microsoft Update Catalog and download the appropriate packages into a `msus\<category>` directory tree located in the same folder as the source ISO. MSCatalogLTS provides commands for searching and downloading updates from the Microsoft Update Catalog.
-- The downloaded packages are saved in `<isoDir>\msus\<category>\` (e.g., msus\LCU\, msus\SetupDU\, msus\SafeOS\, msus\SSU\) so they are reusable across runs and can be applied to the staged media.
+- The downloaded packages are saved in `<isoDir>\msus\<category>\` (e.g., msus\SSU\,msus\LCU\, msus\SafeOS\, msus\SetupDU\) so they are reusable across runs and can be applied to the staged media.
 - For LCUs: if multiple cumulative updates are found for the detected build, all are downloaded (in oldest-to-newest order) to support checkpoint cumulative update chains; otherwise just the latest is used.
 -           if the OnlyLatestLCU option is given, only the latest applicable LCU is downloaded and applied, without checkpoint updates.
 - For Setup DU, SafeOS DU, and SSU: the latest applicable package is selected, preferring the same month as the latest LCU.
@@ -36,15 +36,16 @@ Checkpoint cumulative updates:
 
 Drivers on media:
 - The script creates a special folder at the root of the staged ISO named "$WinpeDriver$". Windows Setup can scan this folder for driver INF files during installation.
-- Place INF-based drivers (subfolders allowed) under \ $WinpeDriver$ in the final media.
+- Place INF-based drivers (subfolders allowed) under \$WinpeDriver$ in the final media.
 
-SetupConfig + convenience launchers:
+SetupConfig + convenience launchers + driver installer:
 - The script writes two SetupConfig files into the ISO root:
   - SetupConfig-Upgrade.ini (for in-place upgrades)
   - SetupConfig-Clean.ini (for clean installs)
-- The script writes two launcher batch files into the ISO root:
+- The script writes three launcher batch files into the ISO root:
   - Upgrade.cmd: runs setup.exe /auto upgrade and passes SetupConfig-Upgrade.ini via /ConfigFile
   - Clean install.cmd: runs setup.exe /auto clean and passes SetupConfig-Clean.ini via /ConfigFile
+  - Install Drivers.cmd: installs drivers from $WinpeDriver$ (if present) using pnputil; intended to be run after the initial installation has completed
 - SetupConfig is applied only when setup.exe is launched with /ConfigFile <path>. Microsoft documents that when running setup from media/ISO, you must include /ConfigFile to use SetupConfig.ini.
 - /Auto {Clean | Upgrade} controls the automated setup mode.
 
@@ -70,11 +71,12 @@ UpdateMSUs behavior:
 
 MSU directory layout:
 - MSU/CAB packages are downloaded into <isoDir>\msus\<category>\ subdirectories.
-- Category subdirectories: LCU, SetupDU, SafeOS, SSU.
+- Category subdirectories: SSU, LCU, SafeOS, SetupDU.
 - Application targets per category:
   - install.wim (each index): SSU (prerequisites) -> LCU (checkpoint chain)
-  - winre.wim (inside install.wim): SSU -> SafeOS DU
-  - boot.wim (all WinPE indices): SSU -> SafeOS DU -> Setup DU
+  - winre.wim (inside install.wim): SafeOS
+  - boot.wim (all WinPE indices): SafeOS
+  - root of ISO: SetupDU
 
 DryRun behavior:
 - With -DryRun, the script completes PREP actions needed to stage the work tree and then prints what would happen for post-PREP actions.
@@ -183,7 +185,11 @@ $script:Name = "BundledWindowsIso.ps1"
 # ==============================
 # git information
 # ==============================
+<<<<<<< HEAD
+$GitHash = "eb21b55"
+=======
 $GitHash = "113b201"
+>>>>>>> 185fb06d48d6a4db3a7bd25ed1bb839b5dd5e0a1
 
 # ==============================
 # Script identity
@@ -220,6 +226,7 @@ $Config = [ordered]@{
   SetupConfigCleanName    = 'SetupConfig-Clean.ini'
   UpgradeCmdName          = 'Upgrade.cmd'
   CleanCmdName            = 'Clean install.cmd'
+  InstallCmdName          = 'Install Drivers.cmd'
 
   SetupConfigUpgradeLines = @(
     '[SetupConfig]',
@@ -256,13 +263,22 @@ echo.
 endlocal
 '@
 
+  InstallCmdTemplate        = @'
+@echo off
+setlocal
+set "SRC=%~dp0"
+:: Must be run elevated to work
+pnputil /add-driver "%SRC%\{0}\*.inf" /subdirs /install
+endlocal
+'@
+
   MsusSubdirName            = 'msus'
 
   CatalogCategoryMatchers = [ordered]@{
-    LCU     = '(?i)\bCumulative Update\b'
-    SetupDU = '(?i)\bSetup Dynamic Update\b'
-    SafeOS  = '(?i)\bSafe OS Dynamic Update\b'
     SSU     = '(?i)\bServicing Stack Update\b'
+    LCU     = '(?i)\bCumulative Update\b'
+    SafeOS  = '(?i)\bSafe OS Dynamic Update\b'
+    SetupDU = '(?i)\bSetup Dynamic Update\b'
   }
   CatalogExcludeTitleTokens = @('preview')
   CatalogDownloadAll        = $true
@@ -1014,7 +1030,7 @@ function Build-InstallWimFromSelection {
 # ==============================
 # SetupConfig + launchers (ISO root)
 # ==============================
-function Write-SetupConfigFiles {
+function Write-ConfigFiles {
   param([Parameter(Mandatory=$true)][string]$IsoRoot)
 
   $upgradeIni = Join-Path $IsoRoot $Config.SetupConfigUpgradeName
@@ -1027,17 +1043,20 @@ function Write-SetupConfigFiles {
   Invoke-Step "Write $($Config.SetupConfigCleanName)"   { Set-Content -Path $cleanIni   -Value $cleanContent   -Encoding ASCII } | Out-Null
 }
 
-function Write-SetupLauncherCmds {
+function Write-Cmds {
   param([Parameter(Mandatory=$true)][string]$IsoRoot)
 
   $upgradeCmd = Join-Path $IsoRoot $Config.UpgradeCmdName
   $cleanCmd   = Join-Path $IsoRoot $Config.CleanCmdName
+  $installCmd = Join-Path $IsoRoot $Config.InstallCmdName
 
   $upgradeCmdContent = $Config.UpgradeCmdTemplate -f $Config.SetupConfigUpgradeName
   $cleanCmdContent   = $Config.CleanCmdTemplate   -f $Config.SetupConfigCleanName
+  $installCmdContent = $Config.InstallCmdTemplate -f $Config.DriverFolderName
 
   Invoke-Step "Write $($Config.UpgradeCmdName)" { Set-Content -Path $upgradeCmd -Value $upgradeCmdContent -Encoding ASCII } | Out-Null
   Invoke-Step "Write $($Config.CleanCmdName)"   { Set-Content -Path $cleanCmd   -Value $cleanCmdContent   -Encoding ASCII } | Out-Null
+  Invoke-Step "Write $($Config.InstallCmdName)" { Set-Content -Path $installCmd -Value $installCmdContent -Encoding ASCII } | Out-Null
 }
 
 # ==============================
@@ -1238,7 +1257,7 @@ function Get-CatalogCandidates {
 function Select-LatestByCategoryPreferMonth {
   param(
     [Parameter(Mandatory=$true)][object[]]$Results,
-    [Parameter(Mandatory=$true)][ValidateSet('LCU','SetupDU','SafeOS','SSU')][string]$Category,
+    [Parameter(Mandatory=$true)][ValidateSet('SSU','LCU','SafeOS','SetupDU')][string]$Category,
     [string]$PreferYYYYMM
   )
 
@@ -1267,7 +1286,7 @@ function Select-LatestByCategoryPreferMonth {
 function Get-AllByCategoryFiltered {
   param(
     [Parameter(Mandatory=$true)][object[]]$Results,
-    [Parameter(Mandatory=$true)][ValidateSet('LCU','SetupDU','SafeOS','SSU')][string]$Category
+    [Parameter(Mandatory=$true)][ValidateSet('SSU','LCU','SafeOS','SetupDU')][string]$Category
   )
 
   $rx = $Config.CatalogCategoryMatchers[$Category]
@@ -1348,7 +1367,7 @@ function Initialize-AllMSUsPresent {
 
   # Non-LCU categories always use the single latest applicable package.
   # LCU may include multiple entries (checkpoint chain); others are always a single entry.
-  foreach ($cat in @('SetupDU','SafeOS','SSU')) {
+  foreach ($cat in @('SSU','SafeOS','SetupDU')) {
     $pick = Select-LatestByCategoryPreferMonth -Results $results -Category $cat -PreferYYYYMM $lcuYM
     if ($pick) {
       $selected[$cat] = @([pscustomobject]@{
@@ -1441,15 +1460,15 @@ function Initialize-DUFolders {
   # Returns a pscustomobject with one ordered hashtable per category:
   #   each hashtable maps "KB#####" -> folder path under $DuRoot\<category>\KB#####\
   $duFolders = [pscustomobject]@{
-    LCU     = [ordered]@{}
-    SetupDU = [ordered]@{}
-    SafeOS  = [ordered]@{}
     SSU     = [ordered]@{}
+    LCU     = [ordered]@{}
+    SafeOS  = [ordered]@{}
+    SetupDU = [ordered]@{}
   }
 
   $totalFiles = 0
   $totalKbs = 0
-  foreach ($cat in @('LCU','SetupDU','SafeOS','SSU')) {
+  foreach ($cat in @('SSU','LCU','SafeOS','SetupDU')) {
     $catSrcDir = Join-Path $msuRoot $cat
     if (-not (Test-Path $catSrcDir)) {
       Write-Verbose ("No {0} directory found under {1}; skipping." -f $cat, $msuRoot)
@@ -1508,22 +1527,21 @@ function Initialize-DUFolders {
     Write-Verbose ("Category {0}: {1} KB folder(s)" -f $cat, $duFolders.$cat.Count)
   }
 
-  Write-Host ("Organized {0} MSU/CAB file(s) into {1} KB folder(s) across categories (LCU:{2}, SetupDU:{3}, SafeOS:{4}, SSU:{5}, DotNet:{6})." -f `
-    $totalFiles, $totalKbs, `
-    $duFolders.LCU.Count, $duFolders.SetupDU.Count, $duFolders.SafeOS.Count, $duFolders.SSU.Count, $duFolders.DotNet.Count) -ForegroundColor Cyan
+  Write-Host ("Organized {0} MSU/CAB file(s) into {1} KB folder(s) across categories (SSU:{2}, LCU:{3}, SafeOS:{4}, SetupDU:{5})." -f `
+    $totalFiles, $totalKbs, $duFolders.SSU.Count, $duFolders.LCU.Count, $duFolders.SafeOS.Count, $duFolders.SetupDU.Count) -ForegroundColor Cyan
   return $duFolders
 }
 
 # ==============================
-# Package application helpers (ordered CU)
+# Package application helpers
 # ==============================
-function Add-CuPackagesOrdered {
+function Add-PackagesOrdered {
   param(
     [Parameter(Mandatory=$true)][string]$MountDir,
     [Parameter(Mandatory=$true)][hashtable]$KbFolders,
     [Parameter(Mandatory=$true)][string]$ScratchRoot,
     [Parameter(Mandatory=$true)][string]$LogBasePath,
-    [string]$ContextLabel = "CU"
+    [Parameter(Mandatory=$true)][string]$ContextLabel
   )
 
   if ($KbFolders.Count -lt 1) {
@@ -1531,7 +1549,7 @@ function Add-CuPackagesOrdered {
     return
   }
 
-  Write-Host ("Applying CU packages for {0} in KB order (total {1} KBs)..." -f $ContextLabel, $KbFolders.Count) -ForegroundColor Cyan
+  Write-Host ("Applying packages to {0} in KB order (total {1} KBs)..." -f $ContextLabel, $KbFolders.Count) -ForegroundColor Cyan
 
   $succeeded = @()
   $failed    = @()
@@ -1547,7 +1565,7 @@ function Add-CuPackagesOrdered {
       Assert-NotCancelled
       $leaf   = Split-Path $pkg -Leaf
       $pkgLog = $LogBasePath.Replace(".log", ("_KB{0}_{1}.log" -f $kb, (Protect-Token $leaf)))
-      $label  = ("Add-Package {0} KB{1}: {2}" -f $ContextLabel, $kb, $leaf)
+      $label  = ("Add-Package {0} {1}: {2}" -f $ContextLabel, $kb, $leaf)
 
       $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
         "/Image:$MountDir",
@@ -1560,7 +1578,63 @@ function Add-CuPackagesOrdered {
       if ($rc -eq 0) {
         $succeeded += $pkg
       } else {
-        Write-Host ("WARNING: Failed to add KB{0}/{1} (exit {2}); skipping. See log: {3}" -f $kb, $leaf, $rc, $pkgLog) -ForegroundColor Yellow
+        Write-Host ("WARNING: Failed to add {0}/{1} (exit {2}); skipping. See log: {3}" -f $kb, $leaf, $rc, $pkgLog) -ForegroundColor Yellow
+        $failed += $pkg
+      }
+    }
+  }
+
+  $total = $succeeded.Count + $failed.Count
+  if ($total -eq 0) {
+    Write-Host ("No packages found for {0}; skipping." -f $ContextLabel) -ForegroundColor Yellow
+    return
+  }
+
+  Write-Host ""
+  Write-Host ("Package apply summary for {0}:" -f $ContextLabel) -ForegroundColor Cyan
+  Write-Host ("  Succeeded: {0}" -f $succeeded.Count) -ForegroundColor Green
+  foreach ($s in $succeeded) { Write-Verbose ("    OK: {0}" -f $s) }
+  if ($failed.Count -gt 0) {
+    Write-Host ("  Failed:    {0}" -f $failed.Count) -ForegroundColor Yellow
+    foreach ($f in $failed) { Write-Host ("    FAILED: {0}" -f $f) -ForegroundColor Yellow }
+  }
+  Write-Host ""
+}
+
+function Add-PackagesToISO {
+  param(
+    [Parameter(Mandatory=$true)][string]$IsoRoot,
+    [Parameter(Mandatory=$true)][hashtable]$KbFolders,
+    [Parameter(Mandatory=$true)][string]$ContextLabel
+  )
+
+  if ($KbFolders.Count -lt 1) {
+    Write-Host ("No KB folders provided for {0}; skipping." -f $ContextLabel) -ForegroundColor Yellow
+    return
+  }
+
+  Write-Host ("Writing packages for {0} to ISO..." -f $ContextLabel) -ForegroundColor Cyan
+
+  $succeeded = @()
+  $failed    = @()
+
+  foreach ($kb in ($KbFolders.Keys | Sort-Object)) {
+    Assert-NotCancelled
+    $kbFolder = $KbFolders[$kb]
+    $pkgFiles = @()
+    $pkgFiles += @(Get-ChildItem -LiteralPath $kbFolder -Filter "*.msu" -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -ExpandProperty FullName)
+    $pkgFiles += @(Get-ChildItem -LiteralPath $kbFolder -Filter "*.cab" -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -ExpandProperty FullName)
+
+    foreach ($pkg in $pkgFiles) {
+      Assert-NotCancelled
+      $leaf = Split-Path $pkg -Leaf
+      Write-Host ("Copying package {0}: {1}" -f $kb, $leaf) -ForegroundColor Cyan
+      $dst = Join-Path $IsoRoot $leaf
+      Copy-Item -Path $pkg -Destination $dst -Force
+      if ($?) {
+        $succeeded += $pkg
+      } else {
+        Write-Host ("WARNING: Failed to add {0}" -f $leaf) -ForegroundColor Yellow
         $failed += $pkg
       }
     }
@@ -1631,14 +1705,10 @@ function Update-WinREInsideMountedOS {
   }
 
   try {
-    # WinRE targets: SSU (prerequisites) -> SafeOS DU
-    if ($DuFolders.SSU.Count -gt 0) {
-      $ssuBase = Join-Path $LogsRoot ("dism_addpackage_winre_ssu_{0}_idx{1}.log" -f $nameTag, $OsIndex)
-      Add-CuPackagesOrdered -MountDir $mDir -KbFolders $DuFolders.SSU -ScratchRoot $ScratchRoot -LogBasePath $ssuBase -ContextLabel ("WinRE {0} SSU" -f $OsName)
-    }
+    # WinRE targets: SafeOS DU
     if ($DuFolders.SafeOS.Count -gt 0) {
       $safeOsBase = Join-Path $LogsRoot ("dism_addpackage_winre_safeos_{0}_idx{1}.log" -f $nameTag, $OsIndex)
-      Add-CuPackagesOrdered -MountDir $mDir -KbFolders $DuFolders.SafeOS -ScratchRoot $ScratchRoot -LogBasePath $safeOsBase -ContextLabel ("WinRE {0} SafeOS" -f $OsName)
+      Add-PackagesOrdered -MountDir $mDir -KbFolders $DuFolders.SafeOS -ScratchRoot $ScratchRoot -LogBasePath $safeOsBase -ContextLabel ("WinRE for {0} SafeOS" -f $OsName)
     }
   }
   finally {
@@ -1652,7 +1722,7 @@ function Update-WinREInsideMountedOS {
     if ($rc2 -ne 0) { Write-Host ("WARNING: Failed to unmount/commit WinRE for {0} (index {1})." -f $OsName, $OsIndex) -ForegroundColor Yellow }
   }
 
-  Invoke-Step ("Replace WinRE in OS image ({0})" -f $OsName) { Copy-Item -Path $tmpWim -Destination $winrePath -Force } | Out-Null
+  Invoke-Step ("Replace WinRE in install.wim image ({0})" -f $OsName) { Copy-Item -Path $tmpWim -Destination $winrePath -Force } | Out-Null
 }
 
 # ==============================
@@ -1671,19 +1741,19 @@ function Update-InstallWimIndex {
 
   $nameTag = Protect-Token $IndexName
 
-  Write-Host ("Servicing OS: {0} (index {1})" -f $IndexName, $Index) -ForegroundColor Cyan
+  Write-Host ("Servicing install.wim: {0} (index {1})" -f $IndexName, $Index) -ForegroundColor Cyan
 
   $mountDir = Join-Path $MountRoot ("os_{0}_idx{1}" -f $nameTag, $Index)
   $mountLog = Join-Path $LogsRoot ("dism_mount_os_{0}_idx{1}.log" -f $nameTag, $Index)
 
-  Invoke-Step ("Prepare mount dir for OS: $IndexName (index $Index)") {
+  Invoke-Step ("Prepare mount dir for install.wim: $IndexName (index $Index)") {
     if (Test-Path $mountDir) { Remove-Item $mountDir -Recurse -Force -ErrorAction SilentlyContinue | Out-Null }
     New-Item -ItemType Directory -Path $mountDir -Force | Out-Null
   } | Out-Null
 
   Assert-ImageNotMounted -ImageFile $WimPath -Index $Index
 
-  Write-Verbose ("Mount OS image: {0} (index {1})" -f $IndexName, $Index)
+  Write-Verbose ("Mount install.wim image: {0} (index {1})" -f $IndexName, $Index)
   $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
     "/Mount-Image",
     "/ImageFile:$WimPath",
@@ -1691,36 +1761,36 @@ function Update-InstallWimIndex {
     "/MountDir:$mountDir",
     "/ScratchDir:$ScratchRoot",
     "/LogPath:$mountLog"
-  ) -StepName ("Mount OS {0} (index {1})" -f $IndexName, $Index)
+  ) -StepName ("Mount install.wim {0} (index {1})" -f $IndexName, $Index)
 
   if ($rc -ne 0) {
-    Write-Host ("WARNING: Failed to mount OS {0} (index {1}). Skipping." -f $IndexName, $Index) -ForegroundColor Yellow
+    Write-Host ("WARNING: Failed to mount install.wim {0} (index {1}). Skipping." -f $IndexName, $Index) -ForegroundColor Yellow
     return
   }
 
   try {
     # install.wim targets: SSU (prerequisites) -> LCU (checkpoint chain, KB order)
     if ($DuFolders.SSU.Count -gt 0) {
-      $ssuBase = Join-Path $LogsRoot ("dism_addpackage_os_{0}_idx{1}_ssu.log" -f $nameTag, $Index)
-      Add-CuPackagesOrdered -MountDir $mountDir -KbFolders $DuFolders.SSU -ScratchRoot $ScratchRoot -LogBasePath $ssuBase -ContextLabel ("OS {0} SSU" -f $IndexName)
+      $ssuBase = Join-Path $LogsRoot ("dism_addpackage_install_wim_{0}_idx{1}_ssu.log" -f $nameTag, $Index)
+      Add-PackagesOrdered -MountDir $mountDir -KbFolders $DuFolders.SSU -ScratchRoot $ScratchRoot -LogBasePath $ssuBase -ContextLabel ("install.wim for {0} SSU" -f $IndexName)
     }
     if ($DuFolders.LCU.Count -gt 0) {
-      $lcuBase = Join-Path $LogsRoot ("dism_addpackage_os_{0}_idx{1}_lcu.log" -f $nameTag, $Index)
-      Add-CuPackagesOrdered -MountDir $mountDir -KbFolders $DuFolders.LCU -ScratchRoot $ScratchRoot -LogBasePath $lcuBase -ContextLabel ("OS {0} LCU" -f $IndexName)
+      $lcuBase = Join-Path $LogsRoot ("dism_addpackage_install_wim_{0}_idx{1}_lcu.log" -f $nameTag, $Index)
+      Add-PackagesOrdered -MountDir $mountDir -KbFolders $DuFolders.LCU -ScratchRoot $ScratchRoot -LogBasePath $ssuBase -ContextLabel ("install.wim for {0} LCU" -f $IndexName)
     }
 
-    # Service WinRE inside this OS image (if it exists)
+    # Service WinRE inside this install.wim image (if it exists)
     Update-WinREInsideMountedOS -OsMountDir $mountDir -OsName $IndexName -OsIndex $Index -DuFolders $DuFolders -ScratchRoot $ScratchRoot -LogsRoot $LogsRoot
   }
   finally {
-    Write-Verbose ("Unmount and commit OS image: {0} (index {1})" -f $IndexName, $Index)
+    Write-Verbose ("Unmount and commit install.wim image: {0} (index {1})" -f $IndexName, $Index)
     $rc2 = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
       "/Unmount-Image",
       "/MountDir:$mountDir",
       "/Commit"
-    ) -StepName ("Commit OS {0} (index {1})" -f $IndexName, $Index)
+    ) -StepName ("Commit install.wim {0} (index {1})" -f $IndexName, $Index)
 
-    if ($rc2 -ne 0) { Write-Host ("WARNING: Failed to unmount/commit OS {0} (index {1})." -f $IndexName, $Index) -ForegroundColor Yellow }
+    if ($rc2 -ne 0) { Write-Host ("WARNING: Failed to unmount/commit install.wim {0} (index {1})." -f $IndexName, $Index) -ForegroundColor Yellow }
   }
 }
 
@@ -1771,18 +1841,10 @@ function Update-BootWim {
     }
 
     try {
-      # boot.wim targets: SSU (prerequisites) -> SafeOS DU (WinRE/recovery) -> Setup DU (setup binaries)
-      if ($DuFolders.SSU.Count -gt 0) {
-        $ssuBase = Join-Path $LogsRoot ("dism_addpackage_boot_ssu_{0}_idx{1}.log" -f $nameTag, $idx)
-        Add-CuPackagesOrdered -MountDir $mountDir -KbFolders $DuFolders.SSU -ScratchRoot $ScratchRoot -LogBasePath $ssuBase -ContextLabel ("boot.wim {0} SSU" -f $nm)
-      }
+      # boot.wim targets: SafeOS DU (WinRE/recovery)
       if ($DuFolders.SafeOS.Count -gt 0) {
         $safeOsBase = Join-Path $LogsRoot ("dism_addpackage_boot_safeos_{0}_idx{1}.log" -f $nameTag, $idx)
-        Add-CuPackagesOrdered -MountDir $mountDir -KbFolders $DuFolders.SafeOS -ScratchRoot $ScratchRoot -LogBasePath $safeOsBase -ContextLabel ("boot.wim {0} SafeOS" -f $nm)
-      }
-      if ($DuFolders.SetupDU.Count -gt 0) {
-        $setupDuBase = Join-Path $LogsRoot ("dism_addpackage_boot_setupdu_{0}_idx{1}.log" -f $nameTag, $idx)
-        Add-CuPackagesOrdered -MountDir $mountDir -KbFolders $DuFolders.SetupDU -ScratchRoot $ScratchRoot -LogBasePath $setupDuBase -ContextLabel ("boot.wim {0} SetupDU" -f $nm)
+        Add-PackagesOrdered -MountDir $mountDir -KbFolders $DuFolders.SafeOS -ScratchRoot $ScratchRoot -LogBasePath $safeOsBase -ContextLabel ("boot.wim for {0} SafeOS" -f $nm)
       }
     }
     finally {
@@ -2029,8 +2091,8 @@ try {
   if (-not (Test-Path $isoSources)) { Stop-Script "ISO sources directory not found: $isoSources" }
 
   # Write SetupConfig + launchers into ISO root
-  Write-SetupConfigFiles -IsoRoot $script:State.IsoRoot
-  Write-SetupLauncherCmds -IsoRoot $script:State.IsoRoot
+  Write-ConfigFiles -IsoRoot $script:State.IsoRoot
+  Write-Cmds -IsoRoot $script:State.IsoRoot
 
   # Move install.* to INSTALL if needed (stash original install image)
   $stashWim = Join-Path $script:State.InstallRoot 'install.wim'
@@ -2167,7 +2229,7 @@ try {
     if (Test-Path $bootWim) { $relevant += $bootWim }
     Clear-PreflightDismMounts -RelevantImageFiles $relevant -RelevantMountRoot $script:State.MountRoot
 
-    # Service install.wim indices: SSU -> LCU (per index); WinRE inside each index: SSU -> SafeOS
+    # Service install.wim indices: SSU -> LCU (per index); WinRE inside each index: SafeOS
     Write-Verbose "Starting install.wim servicing"
     $rebuiltPairs = Get-WimPairs -InstallPath $wimToService
     $rebuiltNameMap = Get-IndexNameMap -Pairs $rebuiltPairs
@@ -2180,13 +2242,17 @@ try {
       Update-InstallWimIndex -WimPath $wimToService -Index $idx -IndexName $nm -DuFolders $duFolders -MountRoot $script:State.MountRoot -LogsRoot $script:State.LogsRoot -ScratchRoot $script:State.ScratchRoot
     }
 
-    # Service boot.wim (WinPE/Setup): SSU -> SafeOS DU -> Setup DU
+    # Service boot.wim (WinPE/Setup): SafeOS DU
     if (Test-Path $bootWim) {
-      Write-Verbose "Starting boot.wim servicing"
       Write-Host "Servicing boot.wim (WinPE)..." -ForegroundColor Cyan
       Update-BootWim -BootWimPath $bootWim -DuFolders $duFolders -MountRoot $script:State.MountRoot -LogsRoot $script:State.LogsRoot -ScratchRoot $script:State.ScratchRoot
     } else {
       Write-Host "WARNING: ISO\sources\boot.wim not found; skipping WinPE/Setup servicing." -ForegroundColor Yellow
+    }
+
+    # Finally copy SetupDU files into the root ISO tree (if any), so they're included in the ISO
+    if ($duFolders.SetupDU.Count -gt 0) {
+      Add-PackagesToISO -IsoRoot $script:State.IsoRoot -KbFolders $duFolders.SetupDU -ContextLabel "SetupDU files"
     }
   }
 
