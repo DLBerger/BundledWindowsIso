@@ -6,35 +6,36 @@ Creates a bundled Windows installation ISO by extracting an input ISO, optionall
 This script operates on a folder that contains a single Windows ISO (excluding *.bundled.iso). It extracts the ISO into a stable work directory, stages the installation media tree, optionally rebuilds ISO\sources\install.wim from selected WIM indices, refreshes the media using Dynamic Update packages, and builds a new bootable ISO.
 
 Dynamic Update (DU) alignment goal:
-- Windows Setup normally contacts Microsoft endpoints early in a feature update or media-based install to acquire Dynamic Update packages, then applies those updates to installation media. These packages can include updates to Setup binaries, SafeOS/WinRE, servicing stack requirements, the latest cumulative update (LCU), and applicable drivers intended for DU. [1](https://learn.microsoft.com/en-us/windows/deployment/update/media-dynamic-update)
-- In environments where devices should not (or cannot) download these during setup, DU packages can be acquired from Microsoft Update Catalog and applied to the image prior to running Setup. [1](https://learn.microsoft.com/en-us/windows/deployment/update/media-dynamic-update)
-- This script aims to pre-stage those DU packages into the media so the resulting ISO behaves like a current, self-contained installation source with minimal additional downloads at install/upgrade time. [1](https://learn.microsoft.com/en-us/windows/deployment/update/media-dynamic-update)
+- Windows Setup normally contacts Microsoft endpoints early in a feature update or media-based install to acquire Dynamic Update packages, then applies those updates to installation media. These packages can include updates to Setup binaries, SafeOS/WinRE, servicing stack requirements, the latest cumulative update (LCU), and applicable drivers intended for DU.
+- In environments where devices should not (or cannot) download these during setup, DU packages can be acquired from Microsoft Update Catalog and applied to the image prior to running Setup.
+- This script aims to pre-stage those DU packages into the media so the resulting ISO behaves like a current, self-contained installation source with minimal additional downloads at install/upgrade time.
 
 DU package acquisition:
-- If DU-related MSU packages are missing (or if -UpdateMSUs is specified), the script uses MSCatalogLTS to search the Microsoft Update Catalog and download the appropriate packages into a `msus\<category>` directory tree located in the same folder as the source ISO. MSCatalogLTS provides commands for searching and downloading updates from the Microsoft Update Catalog. [2](https://www.deploymentresearch.com/removing-applications-from-your-windows-11-image-before-and-during-deployment/)[3](https://thedotsource.com/2021/03/16/building-iso-files-with-powershell-7/)
-- The downloaded packages are saved in `<isoDir>\msus\<category>\` (e.g., msus\LCU\, msus\SetupDU\, msus\SafeOS\, msus\SSU\, msus\DotNet\) so they are reusable across runs and can be applied to the staged media.
+- If DU-related MSU packages are missing (or if -UpdateMSUs is specified), the script uses MSCatalogLTS to search the Microsoft Update Catalog and download the appropriate packages into a `msus\<category>` directory tree located in the same folder as the source ISO. MSCatalogLTS provides commands for searching and downloading updates from the Microsoft Update Catalog.
+- The downloaded packages are saved in `<isoDir>\msus\<category>\` (e.g., msus\LCU\, msus\SetupDU\, msus\SafeOS\, msus\SSU\) so they are reusable across runs and can be applied to the staged media.
 - For LCUs: if multiple cumulative updates are found for the detected build, all are downloaded (in oldest-to-newest order) to support checkpoint cumulative update chains; otherwise just the latest is used.
-- For Setup DU, SafeOS DU, SSU, and .NET: the latest applicable package is selected, preferring the same month as the latest LCU.
+-           if the OnlyLatestLCU option is given, only the latest applicable LCU is downloaded and applied, without checkpoint updates.
+- For Setup DU, SafeOS DU, and SSU: the latest applicable package is selected, preferring the same month as the latest LCU.
 
 DU package application targets:
-Properly updating installation media involves operating on multiple target images. Microsoft identifies the primary targets as: [1](https://learn.microsoft.com/en-us/windows/deployment/update/media-dynamic-update)
+Properly updating installation media involves operating on multiple target images. Microsoft identifies the primary targets as:
 - WinPE (boot.wim): used to install/deploy/repair Windows.
 - WinRE (winre.wim): recovery environment used for offline repair; based on WinPE.
 - Windows OS image(s) (install.wim): one or more Windows editions stored in \sources\install.wim.
 - The full media tree: Setup.exe and supporting media files.
 
 This script refreshes the media by applying the DU package types Microsoft documents for Windows installation media:
-- Latest Cumulative Update (LCU) (and prerequisites/checkpoints when applicable). [1](https://learn.microsoft.com/en-us/windows/deployment/update/media-dynamic-update)
-- Setup Dynamic Update (Setup DU): updates setup binaries/files used for feature updates and installs. [1](https://learn.microsoft.com/en-us/windows/deployment/update/media-dynamic-update)
-- Safe OS Dynamic Update (SafeOS DU): updates the safe operating system used for the recovery environment (WinRE). [1](https://learn.microsoft.com/en-us/windows/deployment/update/media-dynamic-update)
-- Servicing stack requirements: modern LCUs often embed the servicing stack; separate servicing stack packages may exist only when required. [1](https://learn.microsoft.com/en-us/windows/deployment/update/media-dynamic-update)
+- Latest Cumulative Update (LCU) (and prerequisites/checkpoints when applicable).
+- Setup Dynamic Update (Setup DU): updates setup binaries/files used for feature updates and installs.
+- Safe OS Dynamic Update (SafeOS DU): updates the safe operating system used for the recovery environment (WinRE).
+- Servicing stack requirements: modern LCUs often embed the servicing stack; separate servicing stack packages may exist only when required.
 
 Checkpoint cumulative updates:
-- When the catalog search for the detected build number returns multiple LCU entries, all are downloaded in oldest-to-newest order to ensure the full checkpoint chain is available. The existing KB-ordered application logic applies them in the correct sequence. [1](https://learn.microsoft.com/en-us/windows/deployment/update/media-dynamic-update)
-- When acquiring DU packages, Microsoft guidance also recommends ensuring DU packages correspond to the same month as the latest cumulative update; if a DU package is not available for that month, use the most recently published version. [1](https://learn.microsoft.com/en-us/windows/deployment/update/media-dynamic-update)
+- When the catalog search for the detected build number returns multiple LCU entries, all are downloaded in oldest-to-newest order to ensure the full checkpoint chain is available. The existing KB-ordered application logic applies them in the correct sequence.
+- When acquiring DU packages, Microsoft guidance also recommends ensuring DU packages correspond to the same month as the latest cumulative update; if a DU package is not available for that month, use the most recently published version.
 
 Drivers on media:
-- The script creates a special folder at the root of the staged ISO named "$WinpeDriver$". Windows Setup can scan this folder for driver INF files during installation. [4](https://learn.microsoft.com/en-us/windows-hardware/customize/desktop/unattend/microsoft-windows-pnpcustomizationswinpe-driverpaths)[5](https://community.spiceworks.com/t/autounattend-xml-driver-path-issue-for-windows-11-24h2-and-25h2/1244985)
+- The script creates a special folder at the root of the staged ISO named "$WinpeDriver$". Windows Setup can scan this folder for driver INF files during installation.
 - Place INF-based drivers (subfolders allowed) under \ $WinpeDriver$ in the final media.
 
 SetupConfig + convenience launchers:
@@ -44,8 +45,8 @@ SetupConfig + convenience launchers:
 - The script writes two launcher batch files into the ISO root:
   - Upgrade.cmd: runs setup.exe /auto upgrade and passes SetupConfig-Upgrade.ini via /ConfigFile
   - Clean install.cmd: runs setup.exe /auto clean and passes SetupConfig-Clean.ini via /ConfigFile
-- SetupConfig is applied only when setup.exe is launched with /ConfigFile <path>. Microsoft documents that when running setup from media/ISO, you must include /ConfigFile to use SetupConfig.ini. [6](https://github.com/wikijm/PowerShell-AdminScripts/blob/master/Miscellaneous/New-IsoFile.ps1)[7](https://www.winhelponline.com/blog/servicing-stack-diagnosis-dism-sfc/)
-- /Auto {Clean | Upgrade} controls the automated setup mode. [7](https://www.winhelponline.com/blog/servicing-stack-diagnosis-dism-sfc/)
+- SetupConfig is applied only when setup.exe is launched with /ConfigFile <path>. Microsoft documents that when running setup from media/ISO, you must include /ConfigFile to use SetupConfig.ini.
+- /Auto {Clean | Upgrade} controls the automated setup mode.
 
 Index selection:
 - If no selection is provided, behavior depends on -UpdateISO:
@@ -64,19 +65,29 @@ UpdateISO behavior:
 - To force rebuild (and subsequent servicing/refresh), explicitly specify indices (for example: -Pro or -Indices 6,8,10).
 
 UpdateMSUs behavior:
-- -UpdateMSUs forces the DU/MSU download logic via MSCatalogLTS, even if MSU files already exist in the msus subdirectory. [2](https://www.deploymentresearch.com/removing-applications-from-your-windows-11-image-before-and-during-deployment/)[3](https://thedotsource.com/2021/03/16/building-iso-files-with-powershell-7/)
+- -UpdateMSUs forces the DU/MSU download logic via MSCatalogLTS, even if MSU files already exist in the msus subdirectory.
 - Without -UpdateMSUs, download occurs only when DU/MSU packages are missing (none present in the msus subdirectory alongside the ISO).
 
 MSU directory layout:
 - MSU/CAB packages are downloaded into <isoDir>\msus\<category>\ subdirectories.
-- Category subdirectories: LCU, SetupDU, SafeOS, SSU, DotNet.
+- Category subdirectories: LCU, SetupDU, SafeOS, SSU.
 - Application targets per category:
-  - install.wim (each index): SSU (prerequisites) -> LCU (checkpoint chain) -> DotNet
+  - install.wim (each index): SSU (prerequisites) -> LCU (checkpoint chain)
   - winre.wim (inside install.wim): SSU -> SafeOS DU
   - boot.wim (all WinPE indices): SSU -> SafeOS DU -> Setup DU
 
 DryRun behavior:
 - With -DryRun, the script completes PREP actions needed to stage the work tree and then prints what would happen for post-PREP actions.
+
+References:
+[1] https://learn.microsoft.com/en-us/windows/deployment/update/media-dynamic-update
+[2] https://github.com/Marco-online/MSCatalogLTS
+[3] https://www.deploymentresearch.com/removing-applications-from-your-windows-11-image-before-and-during-deployment/
+[4] https://thedotsource.com/2021/03/16/building-iso-files-with-powershell-7/
+[5] https://learn.microsoft.com/en-us/windows-hardware/customize/desktop/unattend/microsoft-windows-pnpcustomizationswinpe-driverpaths
+[6] https://community.spiceworks.com/t/autounattend-xml-driver-path-issue-for-windows-11-24h2-and-25h2/1244985
+[7] https://github.com/wikijm/PowerShell-AdminScripts/blob/master/Miscellaneous/New-IsoFile.ps1
+[8] https://www.winhelponline.com/blog/servicing-stack-diagnosis-dism-sfc/
 
 .PARAMETER Folder
 Optional. Folder to process. If omitted, the current directory is used.
@@ -91,7 +102,10 @@ Deletes the stable work folder before starting.
 Reuses an existing work folder. If used without explicit indices, no rebuild/servicing/DU actions occur.
 
 .PARAMETER UpdateMSUs
-Forces download of DU/MSU packages into the ISO folder using MSCatalogLTS, even if MSUs already exist. [2](https://www.deploymentresearch.com/removing-applications-from-your-windows-11-image-before-and-during-deployment/)[3](https://thedotsource.com/2021/03/16/building-iso-files-with-powershell-7/)
+Forces download of DU/MSU packages into the ISO folder using MSCatalogLTS, even if MSUs already exist.
+
+.PARAMETER OnlyLatestLCU
+Forces only the latest applicable LCU is downloaded and applied, without checkpoint updates.
 
 .PARAMETER UseSystemTemp
 Creates the work folder under the system temp directory instead of under <Folder>\_WinIsoBundlerWork.
@@ -145,7 +159,7 @@ Reuses the existing work folder and forces rebuild/servicing/DU refresh using th
 
 .EXAMPLE
 PS> .\BundledWindowsIso.ps1 -UpdateMSUs
-Forces DU/MSU downloads into the ISO folder using MSCatalogLTS. [2](https://www.deploymentresearch.com/removing-applications-from-your-windows-11-image-before-and-during-deployment/)[3](https://thedotsource.com/2021/03/16/building-iso-files-with-powershell-7/)
+Forces DU/MSU downloads into the ISO folder using MSCatalogLTS.
 
 .EXAMPLE
 PS> .\BundledWindowsIso.ps1 -Indices "* N*"
@@ -156,10 +170,10 @@ PS> .\BundledWindowsIso.ps1 -ShowIndices
 Shows install.wim indices and exits.
 
 .NOTES
-- Dynamic Update packages can be acquired from Microsoft Update Catalog and applied to installation media prior to running Setup. [1](https://learn.microsoft.com/en-us/windows/deployment/update/media-dynamic-update)
-- Microsoft documents the DU package categories (LCU, Setup DU, SafeOS DU, servicing stack requirements) and the image targets involved in updating installation media (WinRE, OS image, WinPE, and the media tree). [1](https://learn.microsoft.com/en-us/windows/deployment/update/media-dynamic-update)
-- Starting with Windows 11, version 24H2, checkpoint cumulative updates might be required as prerequisites for the latest LCU. [1](https://learn.microsoft.com/en-us/windows/deployment/update/media-dynamic-update)
-- The "$WinpeDriver$" folder at the root of installation media can be used to provide drivers that Setup scans during installation. [4](https://learn.microsoft.com/en-us/windows-hardware/customize/desktop/unattend/microsoft-windows-pnpcustomizationswinpe-driverpaths)[5](https://community.spiceworks.com/t/autounattend-xml-driver-path-issue-for-windows-11-24h2-and-25h2/1244985)
+- Dynamic Update packages can be acquired from Microsoft Update Catalog and applied to installation media prior to running Setup.
+- Microsoft documents the DU package categories (LCU, Setup DU, SafeOS DU, servicing stack requirements) and the image targets involved in updating installation media (WinRE, OS image, WinPE, and the media tree).
+- Starting with Windows 11, version 24H2, checkpoint cumulative updates might be required as prerequisites for the latest LCU.
+- The "$WinpeDriver$" folder at the root of installation media can be used to provide drivers that Setup scans during installation.
 #>
 
 # ==============================
@@ -169,7 +183,7 @@ $script:Name = "BundledWindowsIso.ps1"
 # ==============================
 # git information
 # ==============================
-$GitHash = "ec675aa"
+$GitHash = "b2661d8"
 
 # ==============================
 # Script identity
@@ -249,7 +263,6 @@ endlocal
     SetupDU = '(?i)\bSetup Dynamic Update\b'
     SafeOS  = '(?i)\bSafe OS Dynamic Update\b'
     SSU     = '(?i)\bServicing Stack Update\b'
-    DotNet  = '(?i)\bCumulative Update\b.*\b\.NET Framework\b'
   }
   CatalogExcludeTitleTokens = @('preview')
   CatalogDownloadAll        = $true
@@ -317,7 +330,7 @@ function Show-Usage {
   Write-Host ""
   Write-Host "$name ($GitHash)" -ForegroundColor Cyan
   Write-Host "Usage:" -ForegroundColor Cyan
-  Write-Host "  & '$name' [<Folder>] [-ISO <path>] [-DestISO <path>] [-Home|-Pro|-Indices <spec>] [-CleanWork] [-UpdateISO] [-UpdateMSUs] [-CleanMSUs] [-DryRun] [-Verbose]" -ForegroundColor Cyan
+  Write-Host "  & '$name' [<Folder>] [-ISO <path>] [-DestISO <path>] [-Home|-Pro|-Indices <spec>] [-CleanWork] [-UpdateISO] [-UpdateMSUs] [-CleanMSUs] [-OnlyLatestLCU] [-DryRun] [-Debug] [-Verbose]" -ForegroundColor Cyan
   Write-Host "  & '$name' -ShowIndices [-ISO <path>]" -ForegroundColor Cyan
   Write-Host ""
   Write-Host "Key Options:" -ForegroundColor Cyan
@@ -747,10 +760,10 @@ function Copy-IsoContents([string]$SrcDrive, [string]$DstFolder, [string]$IsoPat
   Write-Host ("  Destination: {0}" -f $dstDisplay) -ForegroundColor Cyan
   Write-Host ("  Log:         {0}" -f $logPath) -ForegroundColor Cyan
 
-  $args = @($srcDisplay, $dstDisplay, "*.*") + $Config.RobocopyArgsBase
-  if ($VerbosePreference -ne 'Continue') { $args += $Config.RobocopyArgsQuiet }
+  $robocopyargs = @($srcDisplay, $dstDisplay, "*.*") + $Config.RobocopyArgsBase
+  if ($VerbosePreference -ne 'Continue') { $robocopyargs += $Config.RobocopyArgsQuiet }
 
-  if ($VerbosePreference -ne 'Continue') { robocopy @args *> $logPath } else { robocopy @args }
+  if ($VerbosePreference -ne 'Continue') { robocopy @robocopyargs *> $logPath } else { robocopy @robocopyargs }
   $rc = [int]$LASTEXITCODE
   if ($rc -ge 8) { Stop-Script "Robocopy failed with exit code $rc. See log: $logPath" }
 }
@@ -1180,6 +1193,32 @@ function Save-CatalogUpdateAllFiles {
   }
 }
 
+function Get-CatalogQueryResults {
+  param(
+    [string]$OsName,
+    [string]$OsVersion,
+    [string]$Arch,
+    [string]$ExtraOptions
+  )
+
+  Assert-NotCancelled
+  $query =
+    "-Descending -IncludeDynamic -AllPages -Search " +
+    '"' + "$OsName $OsVersion $Arch" + '"' +
+    $(if ($ExtraOptions -and $ExtraOptions.Trim()) { " $ExtraOptions" }) +
+    $(if ($DebugSwitch)   { " -Debug" }) +
+    $(if ($VerboseSwitch) { " -Verbose" })
+
+  Write-Verbose ("Catalog query attempt: $query")
+  try {
+    $res = Invoke-Expression "Get-MSCatalogUpdate $query"
+  } catch {
+    $res = @()
+  }
+  Write-Verbose ("Catalog query result count for '{0}': {1}" -f $query, $res.Count)
+  return $res
+}
+
 function Get-CatalogCandidates {
   param(
     [Parameter(Mandatory=$true)][string]$OsName,
@@ -1187,29 +1226,19 @@ function Get-CatalogCandidates {
     [Parameter(Mandatory=$true)][string]$Arch
   )
 
-  Assert-NotCancelled
-  $query = "-OperatingSystem $OsName -Version $OsVersion -Architecture $Arch -IncludeDynamic -AllPages"
-  Write-Verbose ("Catalog query attempt: $query")
-
-  try {
-    $res = @(Get-MSCatalogUpdate $query)
-  } catch {
-    $res = @()
-  }
-
-  Write-Verbose ("Catalog query result count for '{0}': {1}" -f $query, $res.Count)
-  if ($res.Count -gt 0) {
-    Write-Host ("Catalog search matched query: {0}" -f $query) -ForegroundColor Cyan
-    return $res
-  }
-
-  return @()
+  Write-Verbose ("Getting catalog query results")
+  # Have to make separate queries for each UpdateType to make sure each is obtained, but any query could return empty
+  $res  = Get-CatalogQueryResults $OsName $OsVersion $Arch ('-UpdateType "Cumulative Updates"')
+  $res += Get-CatalogQueryResults $OsName $OsVersion $Arch ('-UpdateType "Critical Updates"')
+  $res += Get-CatalogQueryResults $OsName $OsVersion $Arch ('-UpdateType "Security Updates"')
+  Write-Host ("Catalog query result count: {0}" -f $res.Count)
+  return $res
 }
 
 function Select-LatestByCategoryPreferMonth {
   param(
     [Parameter(Mandatory=$true)][object[]]$Results,
-    [Parameter(Mandatory=$true)][ValidateSet('LCU','SetupDU','SafeOS','SSU','DotNet')][string]$Category,
+    [Parameter(Mandatory=$true)][ValidateSet('LCU','SetupDU','SafeOS','SSU')][string]$Category,
     [string]$PreferYYYYMM
   )
 
@@ -1221,10 +1250,6 @@ function Select-LatestByCategoryPreferMonth {
       Where-Object { -not (Test-TitleExcluded $_.Title) } |
       Where-Object { $_.Title -match $rx }
   )
-
-  if ($Category -ne 'DotNet') {
-    $filtered = @($filtered | Where-Object { $_.Title -notmatch $Config.CatalogCategoryMatchers.DotNet })
-  }
 
   if ($filtered.Count -lt 1) { return $null }
 
@@ -1242,23 +1267,17 @@ function Select-LatestByCategoryPreferMonth {
 function Get-AllByCategoryFiltered {
   param(
     [Parameter(Mandatory=$true)][object[]]$Results,
-    [Parameter(Mandatory=$true)][ValidateSet('LCU','SetupDU','SafeOS','SSU','DotNet')][string]$Category
+    [Parameter(Mandatory=$true)][ValidateSet('LCU','SetupDU','SafeOS','SSU')][string]$Category
   )
 
   $rx = $Config.CatalogCategoryMatchers[$Category]
 
-  $filtered = @(
+  return @(
     $Results |
       Where-Object { $_.Title } |
       Where-Object { -not (Test-TitleExcluded $_.Title) } |
       Where-Object { $_.Title -match $rx }
   )
-
-  if ($Category -ne 'DotNet') {
-    $filtered = @($filtered | Where-Object { $_.Title -notmatch $Config.CatalogCategoryMatchers.DotNet })
-  }
-
-  return $filtered
 }
 
 function Initialize-AllMSUsPresent {
@@ -1287,7 +1306,7 @@ function Initialize-AllMSUsPresent {
 
   $results = Get-CatalogCandidates -OsName $OsName -OsVersion $OsVersion -Arch $Arch
   if ($results.Count -lt 1) {
-    Write-Host "Catalog search returned no results for $OsName $OsVersion, $Arch."
+    Write-Host "Catalog search returned no results for $OsName $OsVersion $Arch."
      return [pscustomobject]@{}
   }
 
@@ -1310,26 +1329,26 @@ function Initialize-AllMSUsPresent {
      return [pscustomobject]@{}
   }
 
-  $lcuLatest = ($lcuAll | Sort-Object LastUpdated -Descending | Select-Object -First 1)
+  $lcuLatest = ($lcuAll | Select-Object -First 1)
   $lcuYM = (Get-YYYYMMFromTitle $lcuLatest.Title)
+  Write-Verbose ("Latest LCU: {0}" -f $lcuLatest.Title)
 
-  if ($lcuAll.Count -gt 1) {
+  if ($lcuAll.Count -gt 1 -and -not [bool]$OnlyLatestLCU) {
     # Multiple LCU entries detected: download the full checkpoint chain oldest-to-newest
     Write-Host ("Found {0} LCU entries for build {1}; downloading full checkpoint chain." -f $lcuAll.Count, $OsBuild) -ForegroundColor Cyan
-    $selected['LCU'] = @($lcuAll | Sort-Object LastUpdated | ForEach-Object {
+    $selected['LCU'] = @($lcuAll | ForEach-Object {
       [pscustomobject]@{ Category='LCU'; Title=$_.Title; KB=(Get-KBFromTitle $_.Title); YM=(Get-YYYYMMFromTitle $_.Title); Item=$_ }
     })
   } else {
-    # Single LCU entry: no checkpoint chain required
-    $selected['LCU'] = @($lcuAll | ForEach-Object {
+    # Single LCU entry or OnlyLatestLCU flag is set: no checkpoint chain required
+    $selected['LCU'] = @($lcuLatest | ForEach-Object {
       [pscustomobject]@{ Category='LCU'; Title=$_.Title; KB=(Get-KBFromTitle $_.Title); YM=(Get-YYYYMMFromTitle $_.Title); Item=$_ }
     })
   }
 
   # Non-LCU categories always use the single latest applicable package.
   # LCU may include multiple entries (checkpoint chain); others are always a single entry.
-
-  foreach ($cat in @('SetupDU','SafeOS','SSU','DotNet')) {
+  foreach ($cat in @('SetupDU','SafeOS','SSU')) {
     $pick = Select-LatestByCategoryPreferMonth -Results $results -Category $cat -PreferYYYYMM $lcuYM
     if ($pick) {
       $selected[$cat] = @([pscustomobject]@{
@@ -1426,12 +1445,11 @@ function Initialize-DUFolders {
     SetupDU = [ordered]@{}
     SafeOS  = [ordered]@{}
     SSU     = [ordered]@{}
-    DotNet  = [ordered]@{}
   }
 
   $totalFiles = 0
   $totalKbs = 0
-  foreach ($cat in @('LCU','SetupDU','SafeOS','SSU','DotNet')) {
+  foreach ($cat in @('LCU','SetupDU','SafeOS','SSU')) {
     $catSrcDir = Join-Path $msuRoot $cat
     if (-not (Test-Path $catSrcDir)) {
       Write-Verbose ("No {0} directory found under {1}; skipping." -f $cat, $msuRoot)
@@ -1531,7 +1549,6 @@ function Add-CuPackagesOrdered {
       $pkgLog = $LogBasePath.Replace(".log", ("_KB{0}_{1}.log" -f $kb, (Protect-Token $leaf)))
       $label  = ("Add-Package {0} KB{1}: {2}" -f $ContextLabel, $kb, $leaf)
 
-      Write-Verbose ("Adding package: KB{0} / {1}" -f $kb, $leaf)
       $rc = Invoke-External -FilePath $script:State.DismPath -ArgumentList @(
         "/Image:$MountDir",
         "/Add-Package",
@@ -1682,7 +1699,7 @@ function Update-InstallWimIndex {
   }
 
   try {
-    # install.wim targets: SSU (prerequisites) -> LCU (checkpoint chain, KB order) -> DotNet
+    # install.wim targets: SSU (prerequisites) -> LCU (checkpoint chain, KB order)
     if ($DuFolders.SSU.Count -gt 0) {
       $ssuBase = Join-Path $LogsRoot ("dism_addpackage_os_{0}_idx{1}_ssu.log" -f $nameTag, $Index)
       Add-CuPackagesOrdered -MountDir $mountDir -KbFolders $DuFolders.SSU -ScratchRoot $ScratchRoot -LogBasePath $ssuBase -ContextLabel ("OS {0} SSU" -f $IndexName)
@@ -1690,10 +1707,6 @@ function Update-InstallWimIndex {
     if ($DuFolders.LCU.Count -gt 0) {
       $lcuBase = Join-Path $LogsRoot ("dism_addpackage_os_{0}_idx{1}_lcu.log" -f $nameTag, $Index)
       Add-CuPackagesOrdered -MountDir $mountDir -KbFolders $DuFolders.LCU -ScratchRoot $ScratchRoot -LogBasePath $lcuBase -ContextLabel ("OS {0} LCU" -f $IndexName)
-    }
-    if ($DuFolders.DotNet.Count -gt 0) {
-      $dotNetBase = Join-Path $LogsRoot ("dism_addpackage_os_{0}_idx{1}_dotnet.log" -f $nameTag, $Index)
-      Add-CuPackagesOrdered -MountDir $mountDir -KbFolders $DuFolders.DotNet -ScratchRoot $ScratchRoot -LogBasePath $dotNetBase -ContextLabel ("OS {0} DotNet" -f $IndexName)
     }
 
     # Service WinRE inside this OS image (if it exists)
@@ -1795,10 +1808,10 @@ function Build-Iso([string]$IsoRoot, [string]$OutputIso) {
   if (-not (Test-Path $efis)) { Stop-Script "Missing UEFI boot file: $efis" }
 
   $bootdata = "2#p0,e,b$etfs#pEF,e,b$efis"
-  $args = @() + $Config.OscdimgFsArgs + @("-l$($Config.IsoVolumeLabel)", "-bootdata:$bootdata", $IsoRoot, $OutputIso)
+  $oscdimgfsargs = @() + $Config.OscdimgFsArgs + @("-l$($Config.IsoVolumeLabel)", "-bootdata:$bootdata", $IsoRoot, $OutputIso)
 
   Write-Host "Building ISO: $OutputIso" -ForegroundColor Green
-  $rc = Invoke-External -FilePath $script:State.OscdimgPath -ArgumentList $args -StepName "OSCDIMG Build ISO"
+  $rc = Invoke-External -FilePath $script:State.OscdimgPath -ArgumentList $oscdimgfsargs -StepName "OSCDIMG Build ISO"
   if ($rc -ne 0) { Stop-Script "oscdimg failed with exit code $rc" }
 }
 
@@ -1844,6 +1857,7 @@ $FolderArg = $null
 $IsoPath = $null
 $DestIsoPath = $null
 $UseSystemTemp = $false
+$DebugSwitch = $false
 $VerboseSwitch = $false
 $UseADK = $false
 $UseSystem = $false
@@ -1852,6 +1866,7 @@ $ExplicitOscdimg = $null
 $CleanWork = $false
 $UpdateISO = $false
 $UpdateMSUs = $false
+$OnlyLatestLCU = $false
 $CleanMSUs = $false
 $ShowIndices = $false
 $SelectHome = $false
@@ -1864,6 +1879,7 @@ for ($i = 0; $i -lt $args.Count; $i++) {
     '^(?:-h|-help|-\?|/\?)$'   { Show-Usage; exit 0 }
     '^(?:-UseSystemTemp)$'     { $UseSystemTemp = $true; continue }
     '^(?:-Verbose|-v)$'        { $VerboseSwitch = $true; continue }
+    '^(?:-Debug|-d)$'          { $DebugSwitch = $true; continue }
     '^(?:-DryRun)$'            { $script:DryRun = $true; continue }
     '^(?:-UseADK)$'            { $UseADK = $true; continue }
     '^(?:-UseSystem)$'         { $UseSystem = $true; continue }
@@ -1871,6 +1887,7 @@ for ($i = 0; $i -lt $args.Count; $i++) {
     '^(?:-UpdateISO)$'         { $UpdateISO = $true; continue }
     '^(?:-UpdateMSUs)$'        { $UpdateMSUs = $true; continue }
     '^(?:-CleanMSUs)$'         { $CleanMSUs = $true; continue }
+    '^(?:-OnlyLatestLCU)$'     { $OnlyLatestLCU = $true; continue }
     '^(?:-ShowIndices)$'       { $ShowIndices = $true; continue }
     '^(?:-Show)$'              { $ShowIndices = $true; continue }
     '^(?:-Home)$'              { $SelectHome = $true; continue }
@@ -1903,6 +1920,7 @@ for ($i = 0; $i -lt $args.Count; $i++) {
   }
 }
 
+if ($DebugSwitch) { $DebugPreference = 'Continue' }
 if ($VerboseSwitch) { $VerbosePreference = 'Continue' }
 if (-not $FolderArg) { $FolderArg = (Get-Location).Path }
 
@@ -2112,7 +2130,6 @@ try {
   }
 
   # Rebuild ISO\sources\install.wim if requested
-  $wimToService = $null
   if ($doRebuild) {
     $wimToService = Build-InstallWimFromSelection -SourceFile $script:State.StashedInstallWim -IsoSourcesDir $isoSources -SelectedSourceIndices $selected -MaxSourceIndex $maxIndex
   } else {
@@ -2150,7 +2167,7 @@ try {
     if (Test-Path $bootWim) { $relevant += $bootWim }
     Clear-PreflightDismMounts -RelevantImageFiles $relevant -RelevantMountRoot $script:State.MountRoot
 
-    # Service install.wim indices: SSU -> LCU -> DotNet (per index); WinRE inside each index: SSU -> SafeOS
+    # Service install.wim indices: SSU -> LCU (per index); WinRE inside each index: SSU -> SafeOS
     Write-Verbose "Starting install.wim servicing"
     $rebuiltPairs = Get-WimPairs -InstallPath $wimToService
     $rebuiltNameMap = Get-IndexNameMap -Pairs $rebuiltPairs
